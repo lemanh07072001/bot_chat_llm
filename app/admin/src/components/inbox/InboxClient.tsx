@@ -1,0 +1,2222 @@
+"use client";
+
+import {
+  Fragment,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  useSyncExternalStore,
+  type RefObject,
+} from "react";
+import { io, type Socket } from "socket.io-client";
+import {
+  Bell,
+  BellOff,
+  CheckCircle2,
+  ChevronUp,
+  Globe,
+  Hand,
+  Loader2,
+  Lock,
+  RotateCcw,
+  Send,
+  UserPlus,
+  X,
+  Search,
+  MessageSquare,
+  Sparkles,
+  PanelRight,
+  Copy,
+  CheckCheck,
+  Volume2,
+  VolumeX,
+  RefreshCw,
+  MessageCircle,
+  ArrowLeft,
+  Smile,
+  ChevronDown,
+  Inbox,
+  Bold,
+  Italic,
+  Code,
+  Quote,
+} from "lucide-react";
+import type {
+  ChatMessage,
+  Conversation,
+  ConversationCounts,
+  InboxFilter,
+  ProjectRef,
+} from "@/lib/chat";
+import { INBOX_FILTERS, filterToQuery, matchesFilter, visitorLabel } from "@/lib/chat";
+import { InternalNotes } from "./InternalNotes";
+import { DEFAULT_CANNED_RESPONSES, type AccountPreferences } from "./preferences";
+import { getChatTheme, type ChatTheme } from "./chatThemes";
+
+interface CurrentUser {
+  id: string;
+  name: string;
+  role: string;
+}
+
+type InitialThread = {
+  conversation: Conversation;
+  messages: ChatMessage[];
+  hasMore: boolean;
+  nextCursor: string | null;
+};
+
+interface InboxClientProps {
+  initialThread?: InitialThread | null;
+  initial: {
+    conversations: Conversation[];
+    counts: ConversationCounts;
+    hasMore: boolean;
+    nextCursor: string | null;
+    projects: ProjectRef[];
+  };
+  initialFilter: InboxFilter;
+  currentUser: CurrentUser;
+  apiOrigin: string;
+}
+
+type MemberView = { userId: string; name: string; email: string | null; role: string };
+type NotifyPermission = NotificationPermission | "unsupported";
+
+const notifyListeners = new Set<() => void>();
+
+function subscribeNotifyPermission(listener: () => void): () => void {
+  notifyListeners.add(listener);
+  return () => {
+    notifyListeners.delete(listener);
+  };
+}
+
+function readNotifyPermission(): NotifyPermission {
+  return typeof Notification === "undefined" ? "unsupported" : Notification.permission;
+}
+
+const TYPING_THROTTLE_MS = 1200;
+const TYPING_IDLE_MS = 2000;
+const COUNTS_REFRESH_DEBOUNCE_MS = 2500;
+
+const QUICK_EMOJIS = ["👍", "👋", "😊", "🙏", "❤️", "⏳", "✨", "🎯", "👏", "💬"];
+
+// Modern B2B SaaS Avatar Color Tokens (Subtle pastel surfaces with high-contrast text)
+const AVATAR_PALETTES = [
+  { bg: "bg-amber-100 text-amber-800 border-amber-200/80" },
+  { bg: "bg-indigo-100 text-indigo-700 border-indigo-200/80" },
+  { bg: "bg-purple-100 text-purple-700 border-purple-200/80" },
+  { bg: "bg-emerald-100 text-emerald-700 border-emerald-200/80" },
+  { bg: "bg-amber-100 text-amber-800 border-amber-200/80" },
+  { bg: "bg-rose-100 text-rose-700 border-rose-200/80" },
+  { bg: "bg-teal-100 text-teal-700 border-teal-200/80" },
+  { bg: "bg-slate-100 text-slate-700 border-slate-300" },
+];
+
+function getAvatarPalette(name: string) {
+  let hash = 0;
+  for (let i = 0; i < name.length; i++) {
+    hash = name.charCodeAt(i) + ((hash << 5) - hash);
+  }
+  return AVATAR_PALETTES[Math.abs(hash) % AVATAR_PALETTES.length];
+}
+
+function getInitials(name: string) {
+  const parts = name.trim().split(/\s+/);
+  if (!parts.length || !parts[0]) return "KH";
+  if (parts.length === 1) return parts[0].slice(0, 2).toUpperCase();
+  return (parts[0][0] + parts[parts.length - 1][0]).toUpperCase();
+}
+
+function formatRelative(iso: string): string {
+  const diffMs = Date.now() - new Date(iso).getTime();
+  const minutes = Math.floor(diffMs / 60000);
+
+  if (minutes < 1) return "vừa xong";
+  if (minutes < 60) return `${minutes}p`;
+
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h`;
+
+  const days = Math.floor(hours / 24);
+  if (days < 7) return `${days}d`;
+
+  return new Date(iso).toLocaleDateString("vi-VN", { day: "2-digit", month: "2-digit" });
+}
+
+function formatClock(iso: string): string {
+  return new Date(iso).toLocaleTimeString("vi-VN", { hour: "2-digit", minute: "2-digit" });
+}
+
+function formatFullDateTime(iso: string): string {
+  try {
+    const d = new Date(iso);
+    return d.toLocaleDateString("vi-VN", {
+      day: "2-digit",
+      month: "2-digit",
+      year: "numeric",
+      hour: "2-digit",
+      minute: "2-digit",
+    });
+  } catch {
+    return iso;
+  }
+}
+
+function sortByActivity(list: Conversation[]): Conversation[] {
+  return [...list].sort(
+    (a, b) => new Date(b.lastMessageAt).getTime() - new Date(a.lastMessageAt).getTime(),
+  );
+}
+
+function playChime() {
+  try {
+    const AudioCtor =
+      window.AudioContext ??
+      (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+
+    if (!AudioCtor) return;
+
+    const context = new AudioCtor();
+    const gain = context.createGain();
+    gain.gain.setValueAtTime(0.0001, context.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.08, context.currentTime + 0.01);
+    gain.gain.exponentialRampToValueAtTime(0.0001, context.currentTime + 0.35);
+    gain.connect(context.destination);
+
+    [880, 1174].forEach((frequency, index) => {
+      const oscillator = context.createOscillator();
+      oscillator.type = "sine";
+      oscillator.frequency.value = frequency;
+      oscillator.connect(gain);
+      oscillator.start(context.currentTime + index * 0.12);
+      oscillator.stop(context.currentTime + index * 0.12 + 0.12);
+    });
+
+    setTimeout(() => void context.close(), 800);
+  } catch {
+    // Audio unavailable or blocked; non-blocking.
+  }
+}
+
+export function InboxClient({
+  initial,
+  initialFilter,
+  initialThread,
+  currentUser,
+  apiOrigin,
+}: InboxClientProps) {
+  const [filter, setFilter] = useState<InboxFilter>(initialFilter);
+  const [conversations, setConversations] = useState(() => sortByActivity(initial.conversations));
+  const [counts, setCounts] = useState(initial.counts);
+  const [hasMore, setHasMore] = useState(initial.hasMore);
+  const [nextCursor, setNextCursor] = useState(initial.nextCursor);
+  const [projects, setProjects] = useState(initial.projects);
+  const [selectedId, setSelectedId] = useState<string | null>(
+    initialThread?.conversation.id ?? initial.conversations[0]?.id ?? null,
+  );
+  const [loadingList, setLoadingList] = useState(false);
+  const [connected, setConnected] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+  const [searchQuery, setSearchQuery] = useState("");
+  const searchRef = useRef("");
+  const listRequestVersion = useRef(0);
+  const [soundEnabled, setSoundEnabled] = useState(true);
+  const [cannedResponses, setCannedResponses] = useState(DEFAULT_CANNED_RESPONSES);
+  const preferencesRef = useRef<AccountPreferences | null>(null);
+  const [savingSound, setSavingSound] = useState(false);
+  const [showRightSidebar, setShowRightSidebar] = useState(true);
+  const [mobileShowChat, setMobileShowChat] = useState(false);
+  const theme = getChatTheme("front-amber");
+
+  const notifyPermission = useSyncExternalStore(
+    subscribeNotifyPermission,
+    readNotifyPermission,
+    () => "default" as const,
+  );
+
+  const soundEnabledRef = useRef(soundEnabled);
+  useEffect(() => {
+    soundEnabledRef.current = soundEnabled;
+  }, [soundEnabled]);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    const apply = (preferences: AccountPreferences) => {
+      preferencesRef.current = preferences;
+      setSoundEnabled(preferences.soundEnabled ?? true);
+      setCannedResponses(preferences.cannedResponses ?? DEFAULT_CANNED_RESPONSES);
+    };
+    const listener = (event: Event) => {
+      controller.abort();
+      apply((event as CustomEvent<AccountPreferences>).detail);
+    };
+    window.addEventListener("account-preferences", listener);
+    fetch("/api/account/preferences", { signal: controller.signal }).then(async (response) => {
+      if (!response.ok) throw new Error("preferences");
+      apply(await response.json());
+    }).catch(() => {});
+    return () => { controller.abort(); window.removeEventListener("account-preferences", listener); };
+  }, []);
+
+  async function toggleSound() {
+    if (savingSound) return;
+    setSavingSound(true);
+    try {
+      let current = preferencesRef.current;
+      if (!current) {
+        const response = await fetch("/api/account/preferences");
+        if (!response.ok) throw new Error("preferences");
+        current = await response.json() as AccountPreferences;
+      }
+      const response = await fetch("/api/account/preferences", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ soundEnabled: !soundEnabled }),
+      });
+      if (!response.ok) throw new Error("save");
+      preferencesRef.current = await response.json();
+      setSoundEnabled(!soundEnabled);
+    } catch { setError("Không lưu được tùy chọn âm thanh."); }
+    finally { setSavingSound(false); }
+  }
+
+  const socketRef = useRef<Socket | null>(null);
+  const selectedIdRef = useRef(selectedId);
+  const filterRef = useRef(filter);
+  const seenUnread = useRef(
+    new Map(initial.conversations.map((item) => [item.id, item.unreadForAgent ?? 0])),
+  );
+  const countsTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    selectedIdRef.current = selectedId;
+  }, [selectedId]);
+
+  useEffect(() => {
+    filterRef.current = filter;
+  }, [filter]);
+
+  const selected = useMemo(
+    () => conversations.find((conversation) => conversation.id === selectedId) ?? null,
+    [conversations, selectedId],
+  );
+
+  const totalUnread = conversations.reduce(
+    (sum, conversation) => sum + (conversation.unreadForAgent ?? 0),
+    0,
+  );
+
+  useEffect(() => {
+    const base = "Hộp thư đến · Chat Center";
+    document.title = totalUnread > 0 ? `(${totalUnread}) ${base}` : base;
+    return () => {
+      document.title = base;
+    };
+  }, [totalUnread]);
+
+  const refreshCounts = useCallback(() => {
+    if (countsTimer.current) return;
+
+    countsTimer.current = setTimeout(() => {
+      countsTimer.current = null;
+
+      fetch("/api/conversations?limit=1")
+        .then((response) => (response.ok ? response.json() : Promise.reject(new Error("counts"))))
+        .then((data: { counts: ConversationCounts; projects: ProjectRef[] }) => {
+          setCounts(data.counts);
+          setProjects(data.projects);
+        })
+        .catch(() => {});
+    }, COUNTS_REFRESH_DEBOUNCE_MS);
+  }, []);
+
+  useEffect(
+    () => () => {
+      if (countsTimer.current) clearTimeout(countsTimer.current);
+    },
+    [],
+  );
+
+  const loadList = useCallback(
+    async (next: InboxFilter, options: { before?: string } = {}) => {
+      const version = ++listRequestVersion.current;
+      setLoadingList(true);
+      const query = new URLSearchParams(filterToQuery(next));
+      if (searchRef.current.trim()) query.set("search", searchRef.current.trim());
+
+      if (options.before) {
+        query.set("before", options.before);
+      }
+
+      try {
+        const response = await fetch(`/api/conversations?${query.toString()}`);
+        if (!response.ok) throw new Error("list");
+
+        const data = (await response.json()) as {
+          conversations: Conversation[];
+          counts: ConversationCounts;
+          hasMore: boolean;
+          nextCursor: string | null;
+          projects: ProjectRef[];
+        };
+
+        if (version !== listRequestVersion.current) return;
+        setConversations((previous) =>
+          options.before
+            ? sortByActivity([
+                ...previous,
+                ...data.conversations.filter(
+                  (incoming) => !previous.some((existing) => existing.id === incoming.id),
+                ),
+              ])
+            : sortByActivity(data.conversations),
+        );
+        setCounts(data.counts);
+        setProjects(data.projects);
+        setHasMore(data.hasMore);
+        setNextCursor(data.nextCursor);
+        setError(null);
+      } catch {
+        if (version === listRequestVersion.current) setError("Không tải được danh sách hội thoại.");
+      } finally {
+        if (version === listRequestVersion.current) setLoadingList(false);
+      }
+    },
+    [],
+  );
+
+  useEffect(() => {
+    const timer = setTimeout(() => void loadList(filterRef.current), 350);
+    return () => clearTimeout(timer);
+  }, [searchQuery, loadList]);
+
+  const changeFilter = (next: InboxFilter) => {
+    if (next === filter) return;
+
+    setFilter(next);
+    setSelectedId(null);
+    setMobileShowChat(false);
+
+    const url = new URL(window.location.href);
+    url.searchParams.set("filter", next);
+    url.searchParams.delete("conversation");
+    window.history.replaceState(null, "", url);
+
+    void loadList(next);
+  };
+
+  const notifyNewMessage = useCallback((conversation: Conversation) => {
+    if (soundEnabledRef.current) playChime();
+
+    if (typeof Notification === "undefined" || Notification.permission !== "granted") {
+      return;
+    }
+
+    try {
+      new Notification(`Tin nhắn mới · ${visitorLabel(conversation)}`, {
+        body: conversation.lastMessagePreview ?? "",
+        tag: conversation.id,
+      });
+    } catch {}
+  }, []);
+
+  useEffect(() => {
+    const socket = io(apiOrigin, {
+      auth: (cb) => {
+        fetch("/api/ws-ticket", { method: "POST" })
+          .then((response) => (response.ok ? response.json() : Promise.reject(new Error("ticket"))))
+          .then((data: { ticket: string }) => cb({ token: data.ticket }))
+          .catch(() => cb({ token: "" }));
+      },
+      transports: ["websocket", "polling"],
+    });
+
+    socketRef.current = socket;
+
+    socket.on("ready", () => {
+      void loadList(filterRef.current);
+      setConnected(true);
+      setError(null);
+    });
+
+    const markOffline = () => setConnected(false);
+    socket.on("disconnect", markOffline);
+    socket.on("connect_error", markOffline);
+    socket.on("error:auth", () => {
+      markOffline();
+      setError("Phiên làm việc không hợp lệ. Hãy tải lại trang.");
+    });
+
+    socket.on("conversation:updated", (incoming: Conversation) => {
+      const unread = incoming.unreadForAgent ?? 0;
+      const previousUnread = seenUnread.current.get(incoming.id) ?? 0;
+      seenUnread.current.set(incoming.id, unread);
+      if (unread > previousUnread && (incoming.id !== selectedIdRef.current || document.hidden)) {
+        notifyNewMessage(incoming);
+      }
+      if (searchRef.current.trim()) {
+        void loadList(filterRef.current);
+        refreshCounts();
+        return;
+      }
+      setConversations((previous) => {
+        const existing = previous.find((conversation) => conversation.id === incoming.id);
+        const merged = { ...existing, ...incoming } as Conversation;
+        const rest = previous.filter((conversation) => conversation.id !== incoming.id);
+
+        if (!matchesFilter(merged, filterRef.current, currentUser.id)) {
+          return rest;
+        }
+
+        return sortByActivity([merged, ...rest]);
+      });
+
+      refreshCounts();
+    });
+
+    socket.on("access:granted", () => void loadList(filterRef.current));
+
+    socket.on("access:revoked", ({ siteId }: { siteId: string }) => {
+      setConversations((previous) =>
+        previous.filter((conversation) => conversation.siteId !== siteId),
+      );
+      setProjects((previous) => previous.filter((project) => project.id !== siteId));
+      setNotice("Bạn vừa bị thu hồi quyền ở một dự án, các hội thoại của dự án đó đã được ẩn.");
+      refreshCounts();
+    });
+
+    return () => {
+      socket.close();
+      socketRef.current = null;
+    };
+  }, [apiOrigin, currentUser.id, notifyNewMessage, refreshCounts, loadList]);
+
+  const selectConversation = (id: string) => {
+    const url = new URL(window.location.href);
+    url.searchParams.set("conversation", id);
+    window.history.replaceState(null, "", url);
+    setSelectedId(id);
+    setMobileShowChat(true);
+    setConversations((previous) =>
+      previous.map((conversation) =>
+        conversation.id === id ? { ...conversation, unreadForAgent: 0 } : conversation,
+      ),
+    );
+  };
+
+  const runAction = async (
+    conversationId: string,
+    action: "claim" | "release" | "close" | "reopen" | "assign",
+    agentId?: string,
+  ) => {
+    try {
+      const response = await fetch(`/api/conversations/${conversationId}/act`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action, ...(agentId ? { agentId } : {}) }),
+      });
+
+      const data = (await response.json()) as { conversation?: Conversation; error?: string };
+
+      if (!response.ok || !data.conversation) {
+        setError(data.error ?? "Không thực hiện được hành động này.");
+        return;
+      }
+
+      const updated = data.conversation;
+
+      setConversations((previous) => {
+        const rest = previous.filter((conversation) => conversation.id !== updated.id);
+
+        if (!matchesFilter(updated, filterRef.current, currentUser.id)) {
+          if (selectedIdRef.current === updated.id) {
+            setSelectedId(null);
+            setMobileShowChat(false);
+          }
+          return rest;
+        }
+
+        return sortByActivity([updated, ...rest]);
+      });
+
+      setError(null);
+      refreshCounts();
+    } catch {
+      setError("Không kết nối được tới máy chủ.");
+    }
+  };
+
+  const requestNotifications = async () => {
+    if (typeof Notification === "undefined") return;
+    await Notification.requestPermission();
+    notifyListeners.forEach((listener) => listener());
+  };
+
+  const countFor = (key: InboxFilter): number | null => {
+    switch (key) {
+      case "mine":
+        return counts.mine;
+      case "unassigned":
+        return counts.unassigned;
+      case "closed":
+        return counts.closed;
+      default:
+        return counts.open + counts.closed;
+    }
+  };
+
+  const filteredConversations = conversations;
+
+  return (
+    <div className="flex-1 flex flex-col min-h-0 bg-[#F8F9FA]">
+      {/* 1. SaaS Workstation Header */}
+      <header className="h-14 shrink-0 bg-white border-b border-neutral-200/80 px-4 sm:px-6 flex items-center justify-between gap-3 shadow-2xs z-10">
+        {/* Left: Brand Icon & Segmented Filter Control */}
+        <div className="flex items-center gap-3 overflow-x-auto scrollbar-none py-1">
+          <div className="flex items-center gap-2 pr-2 border-r border-neutral-200 hidden sm:flex">
+            <div className={`w-8 h-8 rounded-lg flex items-center justify-center border shadow-2xs ${theme.uiAccent.brandBadge}`}>
+              <Inbox className="w-4 h-4" />
+            </div>
+            <div className="font-semibold text-xs text-neutral-900 whitespace-nowrap">
+              Hộp thư hỗ trợ
+            </div>
+          </div>
+
+          <div className="inline-flex items-center gap-1 p-1 bg-neutral-100 rounded-xl border border-neutral-200/60 shadow-2xs">
+            {INBOX_FILTERS.map(({ key, label }) => {
+              const count = countFor(key);
+              const active = key === filter;
+              const isUnassigned = key === "unassigned";
+
+              return (
+                <button
+                  key={key}
+                  type="button"
+                  onClick={() => changeFilter(key)}
+                  aria-current={active}
+                  className={`inline-flex items-center gap-1.5 px-3 py-1 rounded-lg text-xs font-medium transition cursor-pointer select-none whitespace-nowrap ${
+                    active
+                      ? "bg-white text-neutral-900 shadow-xs font-semibold"
+                      : "text-neutral-600 hover:text-neutral-900 hover:bg-neutral-200/60"
+                  }`}
+                >
+                  <span>{label}</span>
+                  {count !== null && count > 0 && (
+                    <span
+                      className={`text-[10px] font-bold px-1.5 py-0.2 rounded-full tabular-nums leading-none ${
+                        isUnassigned && count > 0
+                          ? active
+                            ? "bg-amber-100 text-amber-900 font-bold"
+                            : "bg-amber-100/90 text-amber-800"
+                          : active
+                            ? "bg-neutral-900 text-white"
+                            : "bg-neutral-200/80 text-neutral-600"
+                      }`}
+                    >
+                      {count}
+                    </span>
+                  )}
+                </button>
+              );
+            })}
+          </div>
+
+          {totalUnread > 0 && (
+            <span className={`hidden lg:inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-medium border shadow-2xs ${theme.uiAccent.brandBadge}`}>
+              <span className={`w-1.5 h-1.5 rounded-full animate-pulse ${theme.uiAccent.activeDot}`} />
+              <span>{totalUnread} tin mới</span>
+            </span>
+          )}
+        </div>
+
+        {/* Right: SaaS Status Controls */}
+        <div className="flex items-center gap-2 shrink-0">
+          {/* Sound Toggle */}
+          <button
+            type="button"
+            disabled={savingSound}
+            onClick={() => void toggleSound()}
+            title={soundEnabled ? "Tắt âm thông báo" : "Bật âm thông báo"}
+            className={`p-1.5 rounded-lg border text-xs transition cursor-pointer shadow-2xs ${
+              soundEnabled
+                ? "bg-white border-neutral-200 text-neutral-700 hover:bg-neutral-50"
+                : "bg-neutral-100 border-neutral-200 text-neutral-400"
+            }`}
+          >
+            {soundEnabled ? (
+              <Volume2 className={`w-3.5 h-3.5 ${theme.uiAccent.icon}`} />
+            ) : (
+              <VolumeX className="w-3.5 h-3.5" />
+            )}
+          </button>
+
+          {/* Browser Notifications */}
+          {notifyPermission === "default" && (
+            <button
+              type="button"
+              onClick={() => void requestNotifications()}
+              className="inline-flex items-center gap-1.5 text-xs font-medium px-2.5 py-1.5 rounded-lg border border-neutral-200 bg-white text-neutral-700 hover:bg-neutral-50 transition cursor-pointer shadow-2xs"
+            >
+              <Bell className={`w-3.5 h-3.5 ${theme.uiAccent.icon}`} />
+              <span className="hidden sm:inline">Thông báo</span>
+            </button>
+          )}
+          {notifyPermission === "denied" && (
+            <span
+              title="Trình duyệt đã chặn thông báo"
+              className="inline-flex items-center gap-1 text-xs p-1.5 rounded-lg border border-neutral-200 bg-neutral-50 text-neutral-400 shadow-2xs"
+            >
+              <BellOff className="w-3.5 h-3.5" />
+            </span>
+          )}
+
+          {/* Realtime Status Indicator */}
+          <div
+            className={`inline-flex items-center gap-1.5 text-xs font-medium px-2.5 py-1 rounded-lg border shadow-2xs ${
+              connected
+                ? "bg-emerald-50 text-emerald-800 border-emerald-200/80"
+                : "bg-amber-50 text-amber-800 border-amber-200/80"
+            }`}
+          >
+            <span
+              className={`w-2 h-2 rounded-full ${
+                connected ? "bg-emerald-500 animate-pulse ring-2 ring-emerald-200" : "bg-amber-500"
+              }`}
+            />
+            <span className="hidden md:inline">{connected ? "Realtime" : "Đang kết nối lại…"}</span>
+          </div>
+
+          {/* Refresh Action */}
+          <button
+            type="button"
+            onClick={() => void loadList(filter)}
+            disabled={loadingList}
+            title="Làm mới danh sách hội thoại"
+            className="p-1.5 rounded-lg border border-neutral-200 bg-white hover:bg-neutral-50 text-neutral-600 transition cursor-pointer disabled:opacity-50 shadow-2xs"
+          >
+            <RefreshCw
+              className={`w-3.5 h-3.5 ${loadingList ? `animate-spin ${theme.uiAccent.icon}` : ""}`}
+            />
+          </button>
+        </div>
+      </header>
+
+      {/* Global Alerts */}
+      {error && (
+        <div className="bg-rose-50 border-b border-rose-200 text-xs text-rose-800 px-4 py-2 flex items-center justify-between gap-3 animate-in fade-in">
+          <span>{error}</span>
+          <button
+            type="button"
+            onClick={() => setError(null)}
+            className="text-rose-500 hover:text-rose-800 p-0.5"
+          >
+            <X className="w-3.5 h-3.5" />
+          </button>
+        </div>
+      )}
+
+      {notice && (
+        <div className="bg-amber-50 border-b border-amber-200 text-xs text-amber-900 px-4 py-2 flex items-center justify-between gap-3 animate-in fade-in">
+          <span>{notice}</span>
+          <button
+            type="button"
+            onClick={() => setNotice(null)}
+            className="text-amber-600 hover:text-amber-900 p-0.5"
+          >
+            <X className="w-3.5 h-3.5" />
+          </button>
+        </div>
+      )}
+
+      {/* 2. Main SaaS 3-Column Workstation */}
+      <div className="flex-1 flex min-h-0 divide-x divide-neutral-200/80 overflow-hidden">
+        {/* Left Column: Triage Queue */}
+        <aside
+          className={`w-full md:w-[320px] lg:w-[340px] xl:w-[360px] min-h-0 shrink-0 flex flex-col bg-white ${
+            mobileShowChat ? "hidden md:flex" : "flex"
+          }`}
+        >
+          {/* SaaS Search Bar */}
+          <div className="p-3 border-b border-neutral-100 bg-neutral-50/50">
+            <div className="relative">
+              <Search className="w-3.5 h-3.5 text-neutral-400 absolute left-3 top-2.5" />
+              <input
+                value={searchQuery}
+                maxLength={100}
+                onChange={(e) => {
+                  searchRef.current = e.target.value;
+                  listRequestVersion.current++;
+                  setSearchQuery(e.target.value);
+                }}
+                placeholder="Tìm tên, email, mã hoặc tin gần nhất…"
+                className={`w-full pl-8 pr-12 py-1.5 rounded-lg border border-neutral-200 bg-white text-xs text-neutral-900 placeholder:text-neutral-400 outline-none transition shadow-2xs ${theme.uiAccent.focusRing}`}
+              />
+              <div className="absolute right-2 top-2 flex items-center gap-1">
+                {searchQuery ? (
+                  <button
+                    type="button"
+                    onClick={() => { searchRef.current = ""; listRequestVersion.current++; setSearchQuery(""); }}
+                    className="text-neutral-400 hover:text-neutral-700"
+                  >
+                    <X className="w-3.5 h-3.5" />
+                  </button>
+                ) : (
+                  <kbd className="hidden sm:inline-block text-[10px] bg-neutral-100 border border-neutral-200 text-neutral-400 px-1 py-0.5 rounded font-mono shadow-2xs">
+                    /
+                  </kbd>
+                )}
+              </div>
+            </div>
+            {searchQuery && (
+              <div className="text-[11px] text-neutral-500 mt-1.5 px-0.5">
+                Tìm thấy {filteredConversations.length} hội thoại phù hợp
+              </div>
+            )}
+          </div>
+
+          {/* Conversation List */}
+          <div className="flex-1 min-h-0 overflow-y-auto divide-y divide-neutral-100/90">
+            {filteredConversations.length === 0 ? (
+              <div className="p-8 text-center">
+                <div className="w-12 h-12 rounded-2xl bg-neutral-100 text-neutral-400 flex items-center justify-center mx-auto mb-3 border border-neutral-200/60 shadow-2xs">
+                  <MessageSquare className="w-6 h-6" />
+                </div>
+                <p className="text-xs font-semibold text-neutral-900">
+                  {loadingList
+                    ? "Đang tải hội thoại…"
+                    : searchQuery
+                      ? "Không có kết quả phù hợp"
+                      : filter === "all"
+                        ? "Chưa có cuộc trò chuyện nào"
+                        : "Không có hội thoại trong mục này"}
+                </p>
+                <p className="text-[11px] text-neutral-500 mt-1 max-w-[220px] mx-auto leading-relaxed">
+                  {searchQuery
+                    ? "Hãy kiểm tra lại từ khóa hoặc xóa bộ lọc tìm kiếm."
+                    : "Khi khách hàng gửi tin nhắn từ Web Widget, hội thoại sẽ xuất hiện ngay tại đây."}
+                </p>
+              </div>
+            ) : (
+              <ul className="divide-y divide-neutral-100">
+                {filteredConversations.map((conversation) => {
+                  const isActive = conversation.id === selectedId;
+                  const mine = conversation.assignedAgentId === currentUser.id;
+                  const label = visitorLabel(conversation);
+                  const initials = getInitials(label);
+                  const palette = getAvatarPalette(label);
+
+                  return (
+                    <li key={conversation.id}>
+                      <button
+                        type="button"
+                        onClick={() => selectConversation(conversation.id)}
+                        aria-current={isActive}
+                        className={`w-full text-left p-3 sm:px-3.5 transition-colors cursor-pointer flex items-start gap-3 border-l-3 ${
+                          isActive
+                            ? theme.uiAccent.activeItem
+                            : "border-l-transparent hover:bg-neutral-50/80"
+                        }`}
+                      >
+                        {/* SaaS Pastel Avatar */}
+                        <div
+                          className={`w-9 h-9 rounded-xl ${palette.bg} border flex items-center justify-center font-bold text-xs shrink-0 shadow-2xs relative`}
+                        >
+                          {initials}
+                          {conversation.unreadForAgent > 0 && (
+                            <span className={`absolute -top-1 -right-1 w-2.5 h-2.5 rounded-full ring-2 ring-white ${theme.uiAccent.activeDot}`} />
+                          )}
+                        </div>
+
+                        {/* Summary Details */}
+                        <div className="flex-1 min-w-0">
+                          <div className="flex items-center justify-between gap-1 mb-0.5">
+                            <span
+                              className={`text-xs truncate ${
+                                conversation.unreadForAgent > 0
+                                  ? "font-bold text-neutral-900"
+                                  : "font-semibold text-neutral-800"
+                              }`}
+                            >
+                              {label}
+                            </span>
+                            <span className="text-[10px] text-neutral-400 shrink-0 font-medium tabular-nums">
+                              {formatRelative(conversation.lastMessageAt)}
+                            </span>
+                          </div>
+
+                          <p
+                            className={`text-[11px] truncate mb-1.5 leading-snug ${
+                              conversation.unreadForAgent > 0
+                                ? "font-semibold text-neutral-900"
+                                : "text-neutral-500"
+                            }`}
+                          >
+                            {conversation.lastMessagePreview ?? "Chưa có tin nhắn"}
+                          </p>
+
+                          {/* Metadata Tags */}
+                          <div className="flex items-center gap-1.5 flex-wrap">
+                            {conversation.siteName && (
+                              <span className="inline-flex items-center gap-1 text-[10px] text-neutral-600 bg-neutral-100 border border-neutral-200/60 px-1.5 py-0.5 rounded shadow-2xs">
+                                <Globe className="w-2.5 h-2.5 text-neutral-400" />
+                                <span className="truncate max-w-[85px]">
+                                  {conversation.siteName}
+                                </span>
+                              </span>
+                            )}
+
+                            {conversation.status === "closed" ? (
+                              <span className="inline-flex items-center gap-1 text-[10px] text-neutral-500 px-1.5 py-0.5 rounded bg-neutral-100 border border-neutral-200/60">
+                                <Lock className="w-2.5 h-2.5" />
+                                Đã đóng
+                              </span>
+                            ) : conversation.assignedAgentId ? (
+                              <span
+                                className={`inline-flex items-center gap-0.5 text-[10px] px-1.5 py-0.5 rounded font-medium border ${
+                                  mine
+                                    ? theme.uiAccent.assignedMine
+                                    : "bg-neutral-100 text-neutral-700 border-neutral-200/60"
+                                }`}
+                              >
+                                {mine ? "Bạn phụ trách" : (conversation.assignedAgentName ?? "Đã nhận")}
+                              </span>
+                            ) : (
+                              <span className="inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded bg-amber-50 text-amber-800 border border-amber-200/80 font-semibold shadow-2xs">
+                                <span className="w-1.5 h-1.5 rounded-full bg-amber-500" />
+                                Chờ nhận
+                              </span>
+                            )}
+
+                            {conversation.unreadForAgent > 0 && (
+                              <span className={`ml-auto text-[10px] font-bold px-1.5 py-0.5 rounded-full shrink-0 tabular-nums shadow-2xs ${theme.uiAccent.unreadBadge}`}>
+                                {conversation.unreadForAgent}
+                              </span>
+                            )}
+                          </div>
+                        </div>
+                      </button>
+                    </li>
+                  );
+                })}
+              </ul>
+            )}
+
+            {hasMore && (
+              <div className="p-3">
+                <button
+                  type="button"
+                  disabled={loadingList}
+                  onClick={() =>
+                    void loadList(filter, {
+                      before: nextCursor ?? undefined,
+                    })
+                  }
+                  className="w-full py-1.5 rounded-lg border border-neutral-200 text-xs font-medium text-neutral-600 hover:bg-neutral-50 disabled:opacity-50 transition cursor-pointer shadow-2xs"
+                >
+                  {loadingList ? "Đang tải…" : "Tải thêm hội thoại cũ"}
+                </button>
+              </div>
+            )}
+          </div>
+        </aside>
+
+        {/* Center Column: Active Conversation Stage */}
+        <section
+          className={`flex-1 flex flex-col min-w-0 min-h-0 overflow-hidden bg-white ${
+            !mobileShowChat ? "hidden md:flex" : "flex"
+          }`}
+        >
+          {!selected ? (
+            <div className="flex-1 flex flex-col items-center justify-center p-8 text-center bg-[#F8F9FA]">
+              <div className="w-14 h-14 rounded-2xl bg-white border border-neutral-200 text-neutral-400 flex items-center justify-center mb-3 shadow-xs">
+                <MessageCircle className="w-7 h-7 text-neutral-400" />
+              </div>
+              <h2 className="text-sm font-semibold text-neutral-900">Chưa chọn cuộc trò chuyện</h2>
+              <p className="text-xs text-neutral-500 mt-1 max-w-xs leading-relaxed">
+                Chọn một hội thoại từ danh sách bên trái để xem nội dung và bắt đầu tương tác với khách hàng.
+              </p>
+            </div>
+          ) : (
+            <ConversationThread
+              cannedResponses={cannedResponses}
+              key={selected.id}
+              conversation={selected}
+              initialThread={initialThread?.conversation.id === selected.id ? initialThread : null}
+              isProjectOwner={
+                projects.find((project) => project.id === selected.siteId)?.access === "owner"
+              }
+              currentUser={currentUser}
+              socketRef={socketRef}
+              connected={connected}
+              showRightSidebar={showRightSidebar}
+              onToggleRightSidebar={() => setShowRightSidebar(!showRightSidebar)}
+              onBackMobile={() => setMobileShowChat(false)}
+              onError={setError}
+              onAction={runAction}
+              currentTheme={theme}
+            />
+          )}
+        </section>
+
+        {/* Right Column: Customer & Context Inspector */}
+        {selected && showRightSidebar && (
+          <aside className="w-72 lg:w-80 shrink-0 bg-white flex flex-col min-h-0 hidden lg:flex">
+            <CustomerInspector
+              conversation={selected}
+              currentUser={currentUser}
+              onClose={() => setShowRightSidebar(false)}
+              onAction={runAction}
+              currentTheme={theme}
+            />
+          </aside>
+        )}
+      </div>
+    </div>
+  );
+}
+
+interface ConversationThreadProps {
+  cannedResponses: string[];
+  initialThread?: InitialThread | null;
+  conversation: Conversation;
+  isProjectOwner: boolean;
+  currentUser: CurrentUser;
+  socketRef: RefObject<Socket | null>;
+  connected: boolean;
+  showRightSidebar: boolean;
+  onToggleRightSidebar: () => void;
+  onBackMobile: () => void;
+  onError: (message: string | null) => void;
+  onAction: (
+    conversationId: string,
+    action: "claim" | "release" | "close" | "reopen" | "assign",
+    agentId?: string,
+  ) => Promise<void>;
+  currentTheme: ChatTheme;
+}
+
+function formatDateDivider(iso: string): string {
+  try {
+    const d = new Date(iso);
+    const now = new Date();
+    if (d.toDateString() === now.toDateString()) {
+      return `Hôm nay, ${d.toLocaleDateString("vi-VN", { day: "numeric", month: "long" })}`;
+    }
+    const yesterday = new Date(now);
+    yesterday.setDate(now.getDate() - 1);
+    if (d.toDateString() === yesterday.toDateString()) {
+      return `Hôm qua, ${d.toLocaleDateString("vi-VN", { day: "numeric", month: "long" })}`;
+    }
+    return d.toLocaleDateString("vi-VN", {
+      weekday: "short",
+      day: "numeric",
+      month: "short",
+      year: "numeric",
+    });
+  } catch {
+    return iso;
+  }
+}
+
+function ConversationThread({
+  cannedResponses,
+  conversation,
+  initialThread,
+  isProjectOwner,
+  currentUser,
+  socketRef,
+  connected,
+  showRightSidebar,
+  onToggleRightSidebar,
+  onBackMobile,
+  onError,
+  onAction,
+  currentTheme,
+}: ConversationThreadProps) {
+  const [messages, setMessages] = useState<ChatMessage[]>(initialThread?.messages ?? []);
+  const [historyCursor, setHistoryCursor] = useState<string | null>(
+    initialThread?.nextCursor ?? null,
+  );
+  const [hasOlder, setHasOlder] = useState(initialThread?.hasMore ?? false);
+  const [loading, setLoading] = useState(!initialThread);
+  const [loadingOlder, setLoadingOlder] = useState(false);
+  const [draft, setDraft] = useState("");
+  const [visitorTyping, setVisitorTyping] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [assigning, setAssigning] = useState(false);
+  const [showCannedMenu, setShowCannedMenu] = useState(false);
+  const [showEmojiPicker, setShowEmojiPicker] = useState(false);
+  const [copiedId, setCopiedId] = useState<string | null>(null);
+  const [reactions, setReactions] = useState<Record<string, Record<string, number>>>({});
+
+  const cannedMenuRef = useRef<HTMLDivElement | null>(null);
+  const emojiPickerRef = useRef<HTMLDivElement | null>(null);
+  const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const scrollRef = useRef<HTMLDivElement | null>(null);
+  const lastTypingSentAt = useRef(0);
+  const typingIdleTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const stickToBottom = useRef(true);
+  const messagesRef = useRef(messages);
+  useEffect(() => { messagesRef.current = messages; }, [messages]);
+
+  const conversationId = conversation.id;
+  const closed = conversation.status === "closed";
+  const mine = conversation.assignedAgentId === currentUser.id;
+  const label = visitorLabel(conversation);
+  const initials = getInitials(label);
+  const palette = getAvatarPalette(label);
+
+  useEffect(() => {
+    let cancelled = false;
+    if (initialThread) return;
+
+    fetch(`/api/conversations/${conversationId}/messages`)
+      .then((response) => (response.ok ? response.json() : Promise.reject(new Error("load"))))
+      .then(
+        (data: {
+          messages: ChatMessage[];
+          hasMore: boolean;
+          nextCursor: string | null;
+        }) => {
+          if (!cancelled) {
+            setMessages(data.messages);
+            setHasOlder(data.hasMore);
+            setHistoryCursor(data.nextCursor);
+          }
+        },
+      )
+      .catch(() => {
+        if (!cancelled) onError("Không tải được nội dung hội thoại.");
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [conversationId, onError, initialThread]);
+
+  const loadOlder = async () => {
+    const oldest = messages[0];
+    if (!oldest || loadingOlder) return;
+
+    setLoadingOlder(true);
+    stickToBottom.current = false;
+
+    try {
+      const response = await fetch(
+        `/api/conversations/${conversationId}/messages?before=${encodeURIComponent(
+          historyCursor ?? oldest.createdAt,
+        )}`,
+      );
+      if (!response.ok) throw new Error("older");
+
+      const data = (await response.json()) as {
+        messages: ChatMessage[];
+        hasMore: boolean;
+        nextCursor: string | null;
+      };
+      setMessages((previous) => [
+        ...data.messages.filter(
+          (incoming) => !previous.some((existing) => existing.id === incoming.id),
+        ),
+        ...previous,
+      ]);
+      setHasOlder(data.hasMore);
+      setHistoryCursor(data.nextCursor);
+    } catch {
+      onError("Không tải được tin nhắn cũ hơn.");
+    } finally {
+      setLoadingOlder(false);
+    }
+  };
+
+  useEffect(() => {
+    const socket = socketRef.current;
+    if (!socket) return;
+
+    const join = () => {
+      socket.emit("conversation:join", { conversationId });
+    };
+
+    const onMessage = (message: ChatMessage) => {
+      if (message.conversationId !== conversationId) return;
+      stickToBottom.current = true;
+      setMessages((previous) =>
+        previous.some((existing) => existing.id === message.id) ? previous : [...previous, message],
+      );
+      if (message.senderKind === "visitor") {
+        setVisitorTyping(false);
+      }
+    };
+
+    const onTyping = (payload: { conversationId: string; from: string; isTyping: boolean }) => {
+      if (payload.from === "visitor" && payload.conversationId === conversationId) {
+        setVisitorTyping(payload.isTyping);
+      }
+    };
+
+    socket.on("message:new", onMessage);
+    socket.on("typing", onTyping);
+    socket.on("ready", join);
+    join();
+
+    return () => {
+      socket.off("message:new", onMessage);
+      socket.off("typing", onTyping);
+      socket.off("ready", join);
+      socket.emit("conversation:leave", { conversationId });
+    };
+  }, [conversationId, socketRef, connected]);
+
+  // Socket.IO does not replay events missed while offline. Read persisted history
+  // until reaching a known message, including gaps larger than a single page.
+  useEffect(() => {
+    if (!connected) return;
+    const controller = new AbortController();
+    const known = new Set(messagesRef.current.map((message) => message.id));
+    async function recoverHistory() {
+      let before: string | null = null;
+      const recovered: ChatMessage[] = [];
+      try {
+        do {
+          const response = await fetch(`/api/conversations/${conversationId}/messages${before ? `?before=${encodeURIComponent(before)}` : ""}`, { signal: controller.signal });
+          if (!response.ok) throw new Error("history");
+          const page = await response.json() as { messages: ChatMessage[]; hasMore: boolean; nextCursor: string | null };
+          recovered.push(...page.messages);
+          if (!known.size || page.messages.some((message) => known.has(message.id)) || !page.hasMore || !page.nextCursor || page.nextCursor === before) break;
+          before = page.nextCursor;
+        } while (!controller.signal.aborted);
+        if (controller.signal.aborted) return;
+        setMessages((previous) => {
+          const merged = new Map(previous.map((message) => [message.id, message]));
+          recovered.forEach((message) => merged.set(message.id, message));
+          return [...merged.values()].sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id));
+        });
+      } catch {
+        if (!controller.signal.aborted) onError("Không tải bù được tin nhắn sau kết nối lại. Hãy tải lại hội thoại.");
+      }
+    }
+    void recoverHistory();
+    return () => controller.abort();
+  }, [connected, conversationId, onError]);
+
+  useEffect(() => {
+    if (stickToBottom.current) {
+      scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight });
+    }
+  }, [messages, visitorTyping]);
+
+  useEffect(
+    () => () => {
+      if (typingIdleTimer.current) clearTimeout(typingIdleTimer.current);
+    },
+    [],
+  );
+
+  useEffect(() => {
+    const handleClickOutside = (e: MouseEvent) => {
+      if (cannedMenuRef.current && !cannedMenuRef.current.contains(e.target as Node)) {
+        setShowCannedMenu(false);
+      }
+      if (emojiPickerRef.current && !emojiPickerRef.current.contains(e.target as Node)) {
+        setShowEmojiPicker(false);
+      }
+    };
+    document.addEventListener("mousedown", handleClickOutside);
+    return () => document.removeEventListener("mousedown", handleClickOutside);
+  }, []);
+
+  useEffect(() => {
+    if (textareaRef.current) {
+      textareaRef.current.style.height = "auto";
+      const nextHeight = Math.min(Math.max(textareaRef.current.scrollHeight, 68), 200);
+      textareaRef.current.style.height = `${nextHeight}px`;
+    }
+  }, [draft]);
+
+  const notifyTyping = () => {
+    const socket = socketRef.current;
+    if (!socket?.connected) return;
+
+    const now = Date.now();
+    if (now - lastTypingSentAt.current > TYPING_THROTTLE_MS) {
+      lastTypingSentAt.current = now;
+      socket.emit("typing", { conversationId, isTyping: true });
+    }
+
+    if (typingIdleTimer.current) clearTimeout(typingIdleTimer.current);
+
+    typingIdleTimer.current = setTimeout(() => {
+      lastTypingSentAt.current = 0;
+      socket.emit("typing", { conversationId, isTyping: false });
+    }, TYPING_IDLE_MS);
+  };
+
+  const send = async () => {
+    const body = draft.trim();
+    const socket = socketRef.current;
+
+    if (!body || !socket?.connected) return;
+
+    setDraft("");
+    if (textareaRef.current) {
+      textareaRef.current.style.height = "68px";
+    }
+    stickToBottom.current = true;
+
+    const ack = (await socket
+      .timeout(10000)
+      .emitWithAck("message:send", { conversationId, body })
+      .catch(() => null)) as { ok: boolean; error?: string; message?: ChatMessage } | null;
+
+    if (!ack?.ok) {
+      setDraft(body);
+      onError(ack?.error ?? "Không gửi được tin nhắn.");
+      return;
+    }
+
+    if (ack.message) {
+      const sent = ack.message;
+      setMessages((previous) =>
+        previous.some((item) => item.id === sent.id) ? previous : [...previous, sent],
+      );
+    }
+    onError(null);
+  };
+
+  const act = async (
+    action: "claim" | "release" | "close" | "reopen" | "assign",
+    agentId?: string,
+  ) => {
+    setBusy(true);
+    await onAction(conversationId, action, agentId);
+    setBusy(false);
+  };
+
+  const handleInsertCanned = (text: string) => {
+    setDraft((prev) => (prev ? `${prev} ${text}` : text));
+    setShowCannedMenu(false);
+    textareaRef.current?.focus();
+  };
+
+  const handleInsertEmoji = (emoji: string) => {
+    setDraft((prev) => `${prev}${emoji}`);
+    setShowEmojiPicker(false);
+    textareaRef.current?.focus();
+  };
+
+  const handleCopyMessage = async (id: string, text: string) => {
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopiedId(id);
+      setTimeout(() => setCopiedId(null), 2000);
+    } catch {
+      // ignore
+    }
+  };
+
+  const handleToggleReaction = (messageId: string, emoji: string) => {
+    setReactions((prev) => {
+      const msgReactions = { ...(prev[messageId] || {}) };
+      msgReactions[emoji] = (msgReactions[emoji] || 0) + 1;
+      return { ...prev, [messageId]: msgReactions };
+    });
+  };
+
+  const applyFormat = (prefix: string, suffix: string = prefix) => {
+    if (!textareaRef.current) return;
+    const el = textareaRef.current;
+    const start = el.selectionStart;
+    const end = el.selectionEnd;
+    const selected = draft.substring(start, end);
+    const replacement = `${prefix}${selected || "văn bản"}${suffix}`;
+    const newDraft = draft.substring(0, start) + replacement + draft.substring(end);
+    setDraft(newDraft);
+    setTimeout(() => {
+      el.focus();
+      el.setSelectionRange(start + prefix.length, end + prefix.length);
+    }, 0);
+  };
+
+  return (
+    <div className={`flex-1 flex flex-col min-h-0 transition-colors ${currentTheme.classes.container}`}>
+      {/* 1. SaaS Thread Header with Theme Switcher */}
+      <header
+        className={`h-14 px-3 sm:px-5 border-b flex items-center justify-between gap-2.5 shrink-0 z-10 transition-colors ${currentTheme.classes.header} ${currentTheme.classes.headerBorder}`}
+      >
+        {/* Left: Contact Identity */}
+        <div className="flex items-center gap-2.5 min-w-0">
+          <button
+            type="button"
+            onClick={onBackMobile}
+            className="md:hidden p-1.5 -ml-1 opacity-70 hover:opacity-100 rounded-lg hover:bg-black/5 dark:hover:bg-white/10"
+            aria-label="Quay lại danh sách"
+          >
+            <ArrowLeft className="w-4 h-4" />
+          </button>
+
+          <div
+            className={`w-9 h-9 rounded-xl ${palette.bg} border flex items-center justify-center font-bold text-xs shrink-0 shadow-2xs`}
+          >
+            {initials}
+          </div>
+
+          <div className="min-w-0">
+            <div className="flex items-center gap-2">
+              <span className={`text-xs sm:text-sm font-semibold truncate ${currentTheme.classes.headerTitle}`}>
+                {label}
+              </span>
+              <span
+                className={`text-[10px] font-semibold px-2 py-0.5 rounded-full border shadow-2xs flex items-center gap-1 ${
+                  closed
+                    ? currentTheme.classes.headerStatusClosed
+                    : currentTheme.classes.headerStatusOpen
+                }`}
+              >
+                <span
+                  className={`w-1.5 h-1.5 rounded-full ${
+                    closed ? "bg-neutral-400" : "bg-emerald-500 animate-pulse"
+                  }`}
+                />
+                {closed ? "Đã đóng" : "Đang mở"}
+              </span>
+            </div>
+
+            <div className={`text-[11px] truncate flex items-center gap-1.5 mt-0.5 ${currentTheme.classes.headerSub}`}>
+              <span>{conversation.siteName ?? "Web Widget"}</span>
+              <span>·</span>
+              <span className="font-medium">
+                {conversation.assignedAgentId
+                  ? mine
+                    ? "Bạn đang phụ trách"
+                    : `${conversation.assignedAgentName ?? "Đồng nghiệp"} phụ trách`
+                  : "Chưa ai tiếp nhận"}
+              </span>
+            </div>
+          </div>
+        </div>
+
+        {/* Conversation actions */}
+        <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
+          {!conversation.assignedAgentId && (
+            <button
+              type="button"
+              disabled={busy}
+              onClick={() => void act("claim")}
+              className={`inline-flex items-center gap-1.5 px-2.5 sm:px-3 py-1.5 rounded-lg text-xs font-semibold shadow-xs disabled:opacity-50 transition cursor-pointer ${currentTheme.classes.sendButton}`}
+            >
+              <Hand className="w-3.5 h-3.5" />
+              <span className="hidden sm:inline">Tiếp nhận</span>
+            </button>
+          )}
+
+          {conversation.assignedAgentId && (
+            <button
+              type="button"
+              disabled={busy}
+              onClick={() => void act("release")}
+              title="Bỏ phân công để người khác tiếp nhận"
+              className={`inline-flex items-center gap-1.5 px-2 sm:px-2.5 py-1.5 rounded-lg text-xs font-medium disabled:opacity-50 transition cursor-pointer shadow-2xs ${currentTheme.classes.actionButton}`}
+            >
+              <RotateCcw className="w-3.5 h-3.5" />
+              <span className="hidden md:inline">Bỏ nhận</span>
+            </button>
+          )}
+
+          {isProjectOwner && (
+            <button
+              type="button"
+              disabled={busy}
+              onClick={() => setAssigning(true)}
+              title="Chuyển hội thoại cho đồng nghiệp"
+              className={`inline-flex items-center gap-1.5 px-2 sm:px-2.5 py-1.5 rounded-lg text-xs font-medium disabled:opacity-50 transition cursor-pointer shadow-2xs ${currentTheme.classes.actionButton}`}
+            >
+              <UserPlus className="w-3.5 h-3.5" />
+              <span className="hidden md:inline">Chuyển giao</span>
+            </button>
+          )}
+
+          <button
+            type="button"
+            disabled={busy}
+            onClick={() => void act(closed ? "reopen" : "close")}
+            title={closed ? "Mở lại cuộc trò chuyện" : "Kết thúc cuộc trò chuyện"}
+            className={`inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium disabled:opacity-50 transition cursor-pointer shadow-2xs ${
+              closed
+                ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 hover:bg-emerald-500/20"
+                : currentTheme.classes.actionButton
+            }`}
+          >
+            {closed ? <RotateCcw className="w-3.5 h-3.5" /> : <CheckCircle2 className="w-3.5 h-3.5" />}
+            <span className="hidden sm:inline">{closed ? "Mở lại" : "Kết thúc"}</span>
+          </button>
+
+          {/* Toggle Inspector Sidebar */}
+          <button
+            type="button"
+            onClick={onToggleRightSidebar}
+            title={showRightSidebar ? "Ẩn thông tin khách" : "Hiện thông tin khách"}
+            className={`p-1.5 rounded-lg border transition cursor-pointer hidden lg:inline-flex shadow-2xs ${
+              showRightSidebar
+                ? currentTheme.uiAccent.brandBadge
+                : currentTheme.classes.actionButton
+            }`}
+          >
+            <PanelRight className="w-4 h-4" />
+          </button>
+        </div>
+      </header>
+
+      {/* 2. Messages Stream */}
+      <div
+        ref={scrollRef}
+        className={`flex-1 min-h-0 overflow-y-auto overscroll-contain px-3 sm:px-6 py-4 space-y-3.5 transition-colors ${currentTheme.classes.stream}`}
+      >
+        {loading ? (
+          <div className="flex items-center justify-center h-full text-xs opacity-60 gap-2">
+            <Loader2 className={`w-4 h-4 animate-spin ${currentTheme.uiAccent.icon}`} />
+            <span>Đang tải tin nhắn…</span>
+          </div>
+        ) : (
+          <>
+            {hasOlder && (
+              <div className="text-center pb-2">
+                <button
+                  type="button"
+                  disabled={loadingOlder}
+                  onClick={() => void loadOlder()}
+                  className={`inline-flex items-center gap-1 text-[11px] font-medium px-3 py-1 rounded-full border disabled:opacity-50 transition shadow-2xs cursor-pointer ${currentTheme.classes.actionButton}`}
+                >
+                  <ChevronUp className="w-3 h-3" />
+                  <span>{loadingOlder ? "Đang tải…" : "Tải tin nhắn cũ hơn"}</span>
+                </button>
+              </div>
+            )}
+
+            {messages.length === 0 ? (
+              <div className="flex flex-col items-center justify-center py-16 text-center">
+                <div className={`w-12 h-12 rounded-2xl flex items-center justify-center mb-2 shadow-xs ${currentTheme.classes.actionButton}`}>
+                  <MessageSquare className="w-6 h-6 opacity-60" />
+                </div>
+                <p className="text-xs opacity-70">Chưa có tin nhắn nào trong hội thoại này.</p>
+              </div>
+            ) : (
+              messages.map((message, idx) => {
+                // Check if date divider is needed
+                const prev = messages[idx - 1];
+                const showDivider =
+                  idx === 0 ||
+                  (prev &&
+                    new Date(prev.createdAt).toDateString() !==
+                      new Date(message.createdAt).toDateString());
+
+                if (message.senderKind === "system") {
+                  return (
+                    <Fragment key={message.id}>
+                      {showDivider && (
+                        <div className="flex justify-center my-3">
+                          <span
+                            className={`text-[11px] font-medium px-3 py-1 rounded-full border shadow-2xs ${currentTheme.classes.dateDivider}`}
+                          >
+                            {formatDateDivider(message.createdAt)}
+                          </span>
+                        </div>
+                      )}
+                      <div className="flex justify-center py-1">
+                        <span
+                          className={`text-[11px] font-medium px-3 py-1 rounded-full border shadow-2xs ${currentTheme.classes.systemMessage}`}
+                        >
+                          {message.body}
+                        </span>
+                      </div>
+                    </Fragment>
+                  );
+                }
+
+                const fromAgent = message.senderKind === "agent";
+                const senderLabel = fromAgent
+                  ? message.senderName || message.sender?.name || "Nhân viên hỗ trợ"
+                  : message.senderName || visitorLabel(conversation);
+
+                const msgReactions = reactions[message.id] || {};
+                const reactionKeys = Object.keys(msgReactions);
+
+                return (
+                  <Fragment key={message.id}>
+                    {showDivider && (
+                      <div className="flex justify-center my-3">
+                        <span
+                          className={`text-[11px] font-medium px-3 py-1 rounded-full border shadow-2xs ${currentTheme.classes.dateDivider}`}
+                        >
+                          {formatDateDivider(message.createdAt)}
+                        </span>
+                      </div>
+                    )}
+
+                    <div
+                      className={`flex items-end gap-2 ${
+                        fromAgent ? "justify-end" : "justify-start"
+                      } group relative`}
+                    >
+                      {/* Avatar on left for visitor in Slack dense mode */}
+                      {!fromAgent && currentTheme.id === "slack-dense" && (
+                        <div
+                          className={`w-8 h-8 rounded-lg ${palette.bg} border flex items-center justify-center font-bold text-xs shrink-0 mb-1`}
+                        >
+                          {initials}
+                        </div>
+                      )}
+
+                      <div className="max-w-[85%] sm:max-w-[72%] relative">
+                        {/* Hover Quick Action Bar */}
+                        <div
+                          className={`absolute -top-7 ${
+                            fromAgent ? "right-0" : "left-0"
+                          } hidden group-hover:flex items-center gap-0.5 px-1.5 py-0.5 rounded-lg z-20 transition-all opacity-0 group-hover:opacity-100 ${
+                            currentTheme.classes.reactionBar
+                          }`}
+                        >
+                          {["👍", "❤️", "😂", "🎉", "🚀"].map((emoji) => (
+                            <button
+                              key={emoji}
+                              type="button"
+                              onClick={() => handleToggleReaction(message.id, emoji)}
+                              className="w-5 h-5 flex items-center justify-center text-xs hover:scale-125 transition cursor-pointer"
+                              title={`Thả cảm xúc ${emoji}`}
+                            >
+                              {emoji}
+                            </button>
+                          ))}
+                          <span className="w-px h-3 bg-neutral-300 dark:bg-white/20 mx-0.5" />
+                          <button
+                            type="button"
+                            onClick={() => void handleCopyMessage(message.id, message.body)}
+                            className="p-1 hover:text-amber-600 transition cursor-pointer text-[10px] flex items-center gap-0.5"
+                            title="Sao chép nội dung tin nhắn"
+                          >
+                            <Copy className="w-3 h-3" />
+                            {copiedId === message.id && (
+                              <span className="text-[9px] text-emerald-500 font-medium">Đã chép</span>
+                            )}
+                          </button>
+                        </div>
+
+                        {/* Sender Label */}
+                        <div
+                          className={`text-[10px] mb-1 px-1 font-medium ${
+                            fromAgent
+                              ? `text-right ${currentTheme.classes.agentSender}`
+                              : `text-left ${currentTheme.classes.visitorSender}`
+                          }`}
+                        >
+                          {senderLabel}
+                        </div>
+
+                        {/* Message Bubble Body */}
+                        <div
+                          className={`px-4 py-2.5 text-xs sm:text-[13px] leading-relaxed whitespace-pre-wrap [overflow-wrap:anywhere] transition-all ${
+                            fromAgent
+                              ? currentTheme.classes.agentBubble
+                              : currentTheme.classes.visitorBubble
+                          }`}
+                        >
+                          {message.body}
+                        </div>
+
+                        {/* Reaction Badges */}
+                        {reactionKeys.length > 0 && (
+                          <div
+                            className={`flex flex-wrap gap-1 mt-1 ${
+                              fromAgent ? "justify-end" : "justify-start"
+                            }`}
+                          >
+                            {reactionKeys.map((emoji) => (
+                              <button
+                                key={emoji}
+                                type="button"
+                                onClick={() => handleToggleReaction(message.id, emoji)}
+                                className={`text-[11px] px-1.5 py-0.5 rounded-md flex items-center gap-1 cursor-pointer transition active:scale-90 ${currentTheme.classes.reactionBadge}`}
+                              >
+                                <span>{emoji}</span>
+                                <span className="font-mono text-[10px] font-bold">
+                                  {msgReactions[emoji]}
+                                </span>
+                              </button>
+                            ))}
+                          </div>
+                        )}
+
+                        {/* Timestamp & Delivery Status */}
+                        <div
+                          className={`text-[10px] mt-1 flex items-center gap-1 ${
+                            fromAgent
+                              ? `justify-end pr-1 ${currentTheme.classes.agentMeta}`
+                              : `pl-1 ${currentTheme.classes.visitorMeta}`
+                          }`}
+                        >
+                          <span>{formatClock(message.createdAt)}</span>
+                          {fromAgent && <CheckCheck className={`w-3.5 h-3.5 opacity-80 ${currentTheme.uiAccent.icon}`} />}
+                        </div>
+                      </div>
+                    </div>
+                  </Fragment>
+                );
+              })
+            )}
+          </>
+        )}
+
+        {/* Realtime Typing Indicator */}
+        {visitorTyping && (
+          <div className="flex items-center gap-2 text-xs pl-2 py-1 animate-in fade-in">
+            <div
+              className={`px-3 py-1.5 rounded-full flex items-center gap-1.5 shadow-2xs ${currentTheme.classes.typingBubble}`}
+            >
+              <span className="flex gap-1 items-center">
+                <span
+                  className={`w-1.5 h-1.5 rounded-full animate-bounce [animation-delay:-0.3s] ${currentTheme.classes.typingDot}`}
+                />
+                <span
+                  className={`w-1.5 h-1.5 rounded-full animate-bounce [animation-delay:-0.15s] ${currentTheme.classes.typingDot}`}
+                />
+                <span
+                  className={`w-1.5 h-1.5 rounded-full animate-bounce ${currentTheme.classes.typingDot}`}
+                />
+              </span>
+              <span className="text-[11px] italic opacity-80">Khách đang soạn tin nhắn…</span>
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* 3. SaaS Composer Box */}
+      <div className={`p-3 sm:p-4 shrink-0 transition-colors ${currentTheme.classes.composerWrapper}`}>
+        {closed && (
+          <div className="mb-2.5 px-3.5 py-2 rounded-xl bg-amber-500/10 border border-amber-500/30 text-xs text-amber-600 dark:text-amber-400 flex items-center justify-between gap-2 shadow-2xs animate-in fade-in">
+            <div className="flex items-center gap-2">
+              <Lock className="w-4 h-4 shrink-0" />
+              <span>
+                Hội thoại này đã kết thúc. Gửi tin nhắn mới sẽ tự động kích hoạt mở lại hội thoại cho khách.
+              </span>
+            </div>
+            <button
+              type="button"
+              onClick={() => void act("reopen")}
+              disabled={busy}
+              className="text-xs font-semibold underline shrink-0 cursor-pointer disabled:opacity-50 hover:opacity-80"
+            >
+              Mở lại ngay
+            </button>
+          </div>
+        )}
+
+        {/* Outer SaaS Input Container */}
+        <div
+          className={`transition-all flex flex-col overflow-hidden ${currentTheme.classes.composerInner}`}
+        >
+          {/* Auto-resizing Textarea */}
+          <textarea
+            ref={textareaRef}
+            value={draft}
+            onChange={(event) => {
+              setDraft(event.target.value);
+              notifyTyping();
+            }}
+            onKeyDown={(event) => {
+              if (event.key === "Enter" && !event.shiftKey) {
+                event.preventDefault();
+                void send();
+              }
+            }}
+            rows={2}
+            disabled={!connected}
+            placeholder={
+              connected
+                ? `Nhập câu trả lời theo phong cách ${currentTheme.name}… (Enter gửi, Shift+Enter xuống dòng)`
+                : "Đang kết nối lại máy chủ…"
+            }
+            aria-label="Nội dung trả lời"
+            className={`w-full resize-none min-h-[68px] max-h-48 px-3.5 pt-3 pb-2 outline-none leading-relaxed text-xs sm:text-[13px] disabled:opacity-50 ${currentTheme.classes.composerTextarea}`}
+          />
+
+          {/* SaaS Bottom Integrated Toolbar */}
+          <div
+            className={`px-3 py-2 flex items-center justify-between gap-2 relative transition-colors ${currentTheme.classes.composerToolbar}`}
+          >
+            {/* Left Quick Tools */}
+            <div className="flex items-center gap-1 sm:gap-1.5 flex-wrap">
+              {/* Markdown Quick Formatting */}
+              <div className="flex items-center bg-black/5 dark:bg-white/5 rounded-lg p-0.5 border border-black/5 dark:border-white/10">
+                <button
+                  type="button"
+                  onClick={() => applyFormat("**")}
+                  title="In đậm (Bold)"
+                  className="p-1 hover:bg-black/10 dark:hover:bg-white/10 rounded transition cursor-pointer text-current opacity-70 hover:opacity-100"
+                >
+                  <Bold className="w-3.5 h-3.5" />
+                </button>
+                <button
+                  type="button"
+                  onClick={() => applyFormat("*")}
+                  title="In nghiêng (Italic)"
+                  className="p-1 hover:bg-black/10 dark:hover:bg-white/10 rounded transition cursor-pointer text-current opacity-70 hover:opacity-100"
+                >
+                  <Italic className="w-3.5 h-3.5" />
+                </button>
+                <button
+                  type="button"
+                  onClick={() => applyFormat("`")}
+                  title="Mã nguồn (Inline Code)"
+                  className="p-1 hover:bg-black/10 dark:hover:bg-white/10 rounded transition cursor-pointer text-current opacity-70 hover:opacity-100"
+                >
+                  <Code className="w-3.5 h-3.5" />
+                </button>
+                <button
+                  type="button"
+                  onClick={() => applyFormat("> ", "")}
+                  title="Trích dẫn (Quote)"
+                  className="p-1 hover:bg-black/10 dark:hover:bg-white/10 rounded transition cursor-pointer text-current opacity-70 hover:opacity-100"
+                >
+                  <Quote className="w-3.5 h-3.5" />
+                </button>
+              </div>
+
+              {/* Canned Responses Popover */}
+              <div className="relative" ref={cannedMenuRef}>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowCannedMenu(!showCannedMenu);
+                    setShowEmojiPicker(false);
+                  }}
+                  title="Chọn mẫu câu phản hồi nhanh"
+                  className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-medium transition cursor-pointer border select-none shadow-2xs ${
+                    showCannedMenu
+                      ? currentTheme.uiAccent.brandBadge
+                      : currentTheme.classes.actionButton
+                  }`}
+                >
+                  <Sparkles className={`w-3.5 h-3.5 ${currentTheme.uiAccent.icon}`} />
+                  <span className="hidden sm:inline">Mẫu câu</span>
+                  <ChevronDown className="w-3 h-3 opacity-60" />
+                </button>
+
+                {showCannedMenu && (
+                  <div className="absolute bottom-full left-0 mb-2 w-80 sm:w-96 rounded-2xl bg-white dark:bg-[#161922] border border-neutral-200 dark:border-white/15 shadow-2xl p-2.5 z-30 animate-in fade-in zoom-in-95 duration-150 text-slate-800 dark:text-neutral-100">
+                    <div className="px-2 py-1.5 border-b border-neutral-100 dark:border-white/10 flex items-center justify-between mb-1.5">
+                      <span className="text-xs font-semibold flex items-center gap-1.5">
+                        <Sparkles className={`w-3.5 h-3.5 ${currentTheme.uiAccent.icon}`} />
+                        Mẫu câu trả lời nhanh
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => setShowCannedMenu(false)}
+                        className="opacity-60 hover:opacity-100 p-0.5 rounded cursor-pointer"
+                      >
+                        <X className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+                    <div className="max-h-56 overflow-y-auto space-y-1 p-0.5">
+                      {cannedResponses.length === 0 && (
+                        <p className="p-2 text-xs opacity-60">Chưa có mẫu câu nào.</p>
+                      )}
+                      {cannedResponses.map((canned, idx) => (
+                        <button
+                          key={idx}
+                          type="button"
+                          onClick={() => handleInsertCanned(canned)}
+                          className="w-full text-left p-2 rounded-lg text-xs hover:bg-black/5 dark:hover:bg-white/10 transition flex items-start gap-2 cursor-pointer group"
+                        >
+                          <span className={`opacity-50 text-[11px] group-hover:${currentTheme.uiAccent.primaryText} mt-0.5 font-mono`}>
+                            #{idx + 1}
+                          </span>
+                          <span className="leading-snug">{canned}</span>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              {/* Emoji Picker */}
+              <div className="relative" ref={emojiPickerRef}>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowEmojiPicker(!showEmojiPicker);
+                    setShowCannedMenu(false);
+                  }}
+                  title="Chèn biểu tượng cảm xúc"
+                  className={`p-1.5 rounded-lg border transition cursor-pointer shadow-2xs ${
+                    showEmojiPicker
+                      ? currentTheme.uiAccent.brandBadge
+                      : currentTheme.classes.actionButton
+                  }`}
+                >
+                  <Smile className="w-3.5 h-3.5" />
+                </button>
+
+                {showEmojiPicker && (
+                  <div className="absolute bottom-full left-0 mb-2 rounded-2xl bg-white dark:bg-[#161922] border border-neutral-200 dark:border-white/15 shadow-2xl p-2 z-30 flex items-center gap-1 animate-in fade-in zoom-in-95 duration-150">
+                    {QUICK_EMOJIS.map((emoji, idx) => (
+                      <button
+                        key={idx}
+                        type="button"
+                        onClick={() => handleInsertEmoji(emoji)}
+                        className="w-7 h-7 rounded-lg hover:bg-black/5 dark:hover:bg-white/10 flex items-center justify-center text-sm transition cursor-pointer hover:scale-110 active:scale-95"
+                      >
+                        {emoji}
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
+
+            {/* Right Tools: Keyboard Shortcut Hint & Send Action */}
+            <div className="flex items-center gap-2">
+              <span className="text-[11px] opacity-60 font-medium hidden md:inline-flex items-center gap-1">
+                <kbd className="px-1.5 py-0.5 rounded bg-black/5 dark:bg-white/10 border border-black/10 dark:border-white/15 text-[10px] font-mono shadow-2xs">
+                  Enter
+                </kbd>
+                gửi
+              </span>
+
+              <button
+                type="button"
+                onClick={() => void send()}
+                disabled={!connected || !draft.trim()}
+                aria-label="Gửi tin nhắn"
+                className={`inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-xl text-xs font-semibold disabled:opacity-40 disabled:cursor-not-allowed transition shadow-xs cursor-pointer active:scale-95 ${currentTheme.classes.sendButton}`}
+              >
+                <span>Gửi</span>
+                <Send className="w-3.5 h-3.5" />
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* Assign Modal */}
+      {assigning && (
+        <AssignDialog
+          siteId={conversation.siteId}
+          currentAssigneeId={conversation.assignedAgentId}
+          onClose={() => setAssigning(false)}
+          onPick={(agentId) => {
+            setAssigning(false);
+            void act("assign", agentId);
+          }}
+        />
+      )}
+    </div>
+  );
+}
+
+/** Right details inspector */
+function CustomerInspector({
+  conversation,
+  currentUser,
+  onClose,
+  onAction,
+  currentTheme,
+}: {
+  conversation: Conversation;
+  currentUser: CurrentUser;
+  onClose: () => void;
+  onAction: (
+    conversationId: string,
+    action: "claim" | "release" | "close" | "reopen" | "assign",
+    agentId?: string,
+  ) => Promise<void>;
+  currentTheme: ChatTheme;
+}) {
+  const [copiedField, setCopiedField] = useState<string | null>(null);
+  const label = visitorLabel(conversation);
+  const initials = getInitials(label);
+  const palette = getAvatarPalette(label);
+
+  const copyToClipboard = (text: string, field: string) => {
+    navigator.clipboard.writeText(text);
+    setCopiedField(field);
+    setTimeout(() => setCopiedField(null), 1800);
+  };
+
+  return (
+    <div className="flex-1 flex flex-col min-h-0 bg-white">
+      {/* Header */}
+      <div className="h-14 px-4 sm:px-5 border-b border-neutral-200/80 flex items-center justify-between shrink-0 shadow-2xs">
+        <h3 className="text-xs font-semibold text-neutral-900">Thông tin khách hàng</h3>
+        <button
+          type="button"
+          onClick={onClose}
+          aria-label="Đóng bảng thông tin"
+          className="text-neutral-400 hover:text-neutral-700 p-1 rounded-md hover:bg-neutral-100"
+        >
+          <X className="w-4 h-4" />
+        </button>
+      </div>
+
+      {/* Content */}
+      <div className="flex-1 overflow-y-auto p-4 space-y-4">
+        {/* Profile Card */}
+        <div className="text-center p-4 rounded-xl bg-neutral-50/70 border border-neutral-200/80 shadow-2xs">
+          <div
+            className={`w-14 h-14 rounded-2xl ${palette.bg} border flex items-center justify-center font-bold text-base mx-auto mb-2 shadow-xs`}
+          >
+            {initials}
+          </div>
+          <h4 className="text-sm font-semibold text-neutral-900">{label}</h4>
+          {conversation.visitor?.email ? (
+            <div className="flex items-center justify-center gap-1.5 text-xs text-neutral-500 mt-1">
+              <span>{conversation.visitor.email}</span>
+              <button
+                onClick={() => copyToClipboard(conversation.visitor!.email!, "email")}
+                title="Sao chép email"
+                className="text-neutral-400 hover:text-neutral-700 p-0.5"
+              >
+                {copiedField === "email" ? (
+                  <CheckCheck className="w-3.5 h-3.5 text-emerald-600" />
+                ) : (
+                  <Copy className="w-3.5 h-3.5" />
+                )}
+              </button>
+            </div>
+          ) : (
+            <span className="inline-block text-[11px] text-neutral-400 mt-0.5">Khách vãng lai</span>
+          )}
+        </div>
+
+        {/* Structured Session Details */}
+        <div className="rounded-xl bg-white border border-neutral-200/80 p-3.5 space-y-3 shadow-2xs">
+          <div className="text-[11px] font-semibold text-neutral-400 uppercase tracking-wider">
+            Chi tiết phiên hỗ trợ
+          </div>
+
+          <div className="flex items-center justify-between text-xs">
+            <span className="text-neutral-500">Trạng thái</span>
+            <span
+              className={`font-semibold px-2 py-0.5 rounded-full text-[11px] border shadow-2xs flex items-center gap-1 ${
+                conversation.status === "closed"
+                  ? "bg-neutral-100 text-neutral-600 border-neutral-200"
+                  : "bg-emerald-50 text-emerald-700 border-emerald-200/80"
+              }`}
+            >
+              <span
+                className={`w-1.5 h-1.5 rounded-full ${
+                  conversation.status === "closed" ? "bg-neutral-400" : "bg-emerald-500"
+                }`}
+              />
+              {conversation.status === "closed" ? "Đã đóng" : "Đang mở"}
+            </span>
+          </div>
+
+          <div className="flex items-center justify-between text-xs">
+            <span className="text-neutral-500">Phụ trách</span>
+            <span className="font-medium text-neutral-900">
+              {conversation.assignedAgentId
+                ? conversation.assignedAgentId === currentUser.id
+                  ? "Bạn (Chuyên viên)"
+                  : (conversation.assignedAgentName ?? "Đồng nghiệp")
+                : "Chưa phân công"}
+            </span>
+          </div>
+
+          <div className="flex items-center justify-between text-xs">
+            <span className="text-neutral-500">Kênh kết nối</span>
+            <span className="font-medium text-neutral-900">Web Chat Widget</span>
+          </div>
+
+          {conversation.siteName && (
+            <div className="flex items-center justify-between text-xs">
+              <span className="text-neutral-500">Website / Dự án</span>
+              <span className="font-medium text-neutral-900 truncate max-w-[140px]">
+                {conversation.siteName}
+              </span>
+            </div>
+          )}
+
+          <div className="flex items-center justify-between text-xs">
+            <span className="text-neutral-500">Bắt đầu lúc</span>
+            <span className="text-neutral-700 font-medium tabular-nums">
+              {formatFullDateTime(conversation.createdAt)}
+            </span>
+          </div>
+
+          <div className="flex items-center justify-between text-xs">
+            <span className="text-neutral-500">Mã Visitor ID</span>
+            <div className="flex items-center gap-1 font-mono text-[11px] text-neutral-700 bg-neutral-50 px-1.5 py-0.5 rounded border border-neutral-200">
+              <span>{conversation.visitorId.slice(0, 8)}…</span>
+              <button
+                onClick={() => copyToClipboard(conversation.visitorId, "visitorId")}
+                title="Sao chép Visitor ID"
+                className="text-neutral-400 hover:text-neutral-700 ml-0.5"
+              >
+                {copiedField === "visitorId" ? (
+                  <CheckCheck className="w-3 h-3 text-emerald-600" />
+                ) : (
+                  <Copy className="w-3 h-3" />
+                )}
+              </button>
+            </div>
+          </div>
+        </div>
+
+        {/* Quick Action Button in panel */}
+        {!conversation.assignedAgentId && (
+          <button
+            type="button"
+            onClick={() => void onAction(conversation.id, "claim")}
+            className={`w-full py-2 rounded-xl text-white text-xs font-semibold transition shadow-xs flex items-center justify-center gap-1.5 cursor-pointer ${currentTheme.uiAccent.primaryBtn}`}
+          >
+            <Hand className="w-3.5 h-3.5" />
+            <span>Tiếp nhận cuộc trò chuyện này</span>
+          </button>
+        )}
+      </div>
+      <InternalNotes key={conversation.id} conversationId={conversation.id} />
+    </div>
+  );
+}
+
+/** Assign dialog */
+function AssignDialog({
+  siteId,
+  currentAssigneeId,
+  onClose,
+  onPick,
+}: {
+  siteId: string;
+  currentAssigneeId: string | null;
+  onClose: () => void;
+  onPick: (agentId: string) => void;
+}) {
+  const [members, setMembers] = useState<MemberView[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [filterQuery, setFilterQuery] = useState("");
+
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [onClose]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    fetch(`/api/sites/${siteId}/members`)
+      .then((response) => (response.ok ? response.json() : Promise.reject(new Error("members"))))
+      .then((data: { members: MemberView[] }) => {
+        if (!cancelled) setMembers(data.members);
+      })
+      .catch(() => {
+        if (!cancelled) setError("Không tải được danh sách người trong dự án.");
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [siteId]);
+
+  const filteredMembers = (members ?? []).filter(
+    (m) =>
+      m.name.toLowerCase().includes(filterQuery.toLowerCase()) ||
+      (m.email ?? "").toLowerCase().includes(filterQuery.toLowerCase()),
+  );
+
+  return (
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-label="Chuyển hội thoại"
+      className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-neutral-900/40 backdrop-blur-xs animate-in fade-in duration-150"
+      onClick={(event) => {
+        if (event.target === event.currentTarget) onClose();
+      }}
+    >
+      <div className="w-full max-w-sm rounded-2xl bg-white shadow-2xl border border-neutral-200 overflow-hidden animate-in zoom-in-95 duration-150">
+        <div className="px-4 py-3 border-b border-neutral-200/90 flex items-center justify-between bg-neutral-50/70">
+          <div className="flex items-center gap-2">
+            <UserPlus className="w-4 h-4 text-amber-600" />
+            <h2 className="text-xs font-semibold text-neutral-900">
+              Chuyển hội thoại cho đồng nghiệp
+            </h2>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            aria-label="Đóng"
+            className="text-neutral-400 hover:text-neutral-700 p-0.5 rounded cursor-pointer"
+          >
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+
+        <div className="p-3 border-b border-neutral-100">
+          <div className="relative">
+            <Search className="w-3.5 h-3.5 text-neutral-400 absolute left-2.5 top-2.5" />
+            <input
+              value={filterQuery}
+              onChange={(e) => setFilterQuery(e.target.value)}
+              placeholder="Tìm theo tên hoặc email…"
+              className="w-full pl-8 pr-3 py-1.5 rounded-lg border border-neutral-200 text-xs outline-none focus:border-amber-500 focus:ring-2 focus:ring-amber-500/15"
+            />
+          </div>
+        </div>
+
+        <div className="p-2 max-h-72 overflow-y-auto">
+          {error ? (
+            <p className="p-3 text-xs text-rose-700">{error}</p>
+          ) : members === null ? (
+            <div className="flex items-center justify-center p-6 text-xs text-neutral-400 gap-2">
+              <Loader2 className="w-4 h-4 animate-spin text-amber-600" />
+              <span>Đang tải thành viên…</span>
+            </div>
+          ) : filteredMembers.length === 0 ? (
+            <p className="p-4 text-xs text-center text-neutral-400">
+              {filterQuery
+                ? "Không tìm thấy đồng nghiệp phù hợp"
+                : "Dự án này chưa có thành viên nào khác."}
+            </p>
+          ) : (
+            <ul className="space-y-1">
+              {filteredMembers.map((member) => (
+                <li key={member.userId}>
+                  <button
+                    type="button"
+                    disabled={member.userId === currentAssigneeId}
+                    onClick={() => onPick(member.userId)}
+                    className="w-full text-left px-3 py-2 rounded-xl hover:bg-neutral-50 disabled:opacity-50 disabled:hover:bg-transparent transition cursor-pointer flex items-center justify-between"
+                  >
+                    <div>
+                      <div className="text-xs font-semibold text-neutral-900">
+                        {member.name}
+                        {member.userId === currentAssigneeId && (
+                          <span className="ml-1.5 text-[10px] text-amber-600 font-normal">
+                            (đang phụ trách)
+                          </span>
+                        )}
+                      </div>
+                      <div className="text-[11px] text-neutral-400">
+                        {member.email ?? "—"} ·{" "}
+                        {member.role === "owner" ? "Quản trị viên" : "Chuyên viên"}
+                      </div>
+                    </div>
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}

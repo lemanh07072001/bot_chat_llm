@@ -1,0 +1,63 @@
+/**
+ * Serves the embed demo the way production would: the customer page, the
+ * widget bundle and the api all live on different origins, so this also
+ * exercises the cross-origin path.
+ *
+ *   node demos/serve.mjs
+ *
+ *   http://localhost:4500  the "customer website"
+ *   http://localhost:4173  the "CDN" serving widget.js
+ *
+ * Build the widget first: cd app/widget && npm run build
+ */
+import { createServer } from 'node:http';
+import { readFile } from 'node:fs/promises';
+import { fileURLToPath } from 'node:url';
+import { dirname, join } from 'node:path';
+
+const here = dirname(fileURLToPath(import.meta.url));
+const PAGE = join(here, 'widget-embed', 'index.html');
+const WIDGET_DIR = join(here, '..', 'app', 'widget', 'dist');
+
+const SITE_PORT = 4500;
+const CDN_PORT = 4173;
+
+async function send(res, status, body, contentType) {
+  res.writeHead(status, {
+    'Content-Type': contentType,
+    'Cache-Control': 'no-store',
+  });
+  res.end(body);
+}
+
+createServer(async (req, res) => {
+  try {
+    const html = await readFile(PAGE);
+    await send(res, 200, html, 'text/html; charset=utf-8');
+  } catch {
+    await send(res, 404, 'demo page not found', 'text/plain; charset=utf-8');
+  }
+}).listen(SITE_PORT, () => {
+  console.log(`customer site  http://localhost:${SITE_PORT}`);
+});
+
+createServer(async (req, res) => {
+  // The bundle is fetched by pages on other origins, so it needs CORS.
+  res.setHeader('Access-Control-Allow-Origin', '*');
+
+  const name = req.url === '/widget.mjs' ? 'widget.mjs' : 'widget.js';
+
+  try {
+    const file = await readFile(join(WIDGET_DIR, name));
+    await send(res, 200, file, 'text/javascript; charset=utf-8');
+  } catch {
+    await send(
+      res,
+      404,
+      '// widget bundle missing — run: cd app/widget && npm run build',
+      'text/javascript; charset=utf-8',
+    );
+  }
+}).listen(CDN_PORT, () => {
+  console.log(`widget bundle  http://localhost:${CDN_PORT}/widget.js`);
+});

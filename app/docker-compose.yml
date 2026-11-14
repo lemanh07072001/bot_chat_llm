@@ -1,0 +1,110 @@
+# Production stack. Copy .env.production.example to .env.production first, then:
+#   docker compose --env-file .env.production up -d --build
+# See DEPLOY.md for the full runbook.
+
+name: chat-center
+
+services:
+  mongo:
+    image: mongo:8
+    restart: unless-stopped
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_ROOT_USERNAME}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_ROOT_PASSWORD}
+    volumes:
+      - mongo-data:/data/db
+      - ./backups:/backups
+    # Never published to the host: only the api needs to reach it, over the
+    # compose network.
+    expose:
+      - "27017"
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  api:
+    build:
+      context: .
+      dockerfile: docker/api.Dockerfile
+    restart: unless-stopped
+    env_file:
+      - .env.production
+    environment:
+      NODE_ENV: production
+      PORT: "3002"
+      REDIS_URL: redis://redis:6379
+      PUBLIC_REALTIME_URL: ${PUBLIC_REALTIME_URL}
+      WIDGET_ASSET_DIR: /srv/widget
+      # nginx is the only hop, so X-Forwarded-For can be trusted; the per-IP
+      # rate limits depend on it.
+      TRUST_PROXY: "1"
+    expose:
+      - "3002"
+    depends_on:
+      mongo:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://127.0.0.1:3002/api/health"]
+      interval: 20s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
+  admin:
+    build:
+      context: .
+      dockerfile: docker/admin.Dockerfile
+      args:
+        # Inlined into the build, so changing it needs a rebuild of this image.
+        NEXT_PUBLIC_API_URL: ${PUBLIC_API_URL}
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      PORT: "3000"
+      HOSTNAME: 0.0.0.0
+      # Read at runtime by the server components that call the api.
+      API_URL: ${PUBLIC_API_URL}
+      NEXT_PUBLIC_API_URL: ${PUBLIC_API_URL}
+    expose:
+      - "3000"
+    depends_on:
+      api:
+        condition: service_started
+
+  nginx:
+    image: nginx:1.27-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./docker/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./letsencrypt:/etc/letsencrypt:ro
+      - ./certbot-webroot:/var/www/certbot
+      - nginx-cache:/var/cache/nginx
+    depends_on:
+      - api
+      - admin
+
+  # One-shot: `docker compose run --rm certbot` issues or renews the
+  # certificate. Not started with the stack.
+  certbot:
+    image: certbot/certbot:latest
+    profiles:
+      - tools
+    volumes:
+      - ./letsencrypt:/etc/letsencrypt
+      - ./certbot-webroot:/var/www/certbot
+    entrypoint: >
+      certbot certonly --webroot -w /var/www/certbot
+      --cert-name ${APP_DOMAIN}
+      -d ${APP_DOMAIN} -d ${API_DOMAIN}
+      --email ${LETSENCRYPT_EMAIL} --agree-tos --no-eff-email
+      --keep-until-expiring
+
+volumes:
+  mongo-data:
+  nginx-cache:

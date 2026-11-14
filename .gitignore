@@ -1,0 +1,25 @@
+# Dependencies and generated output
+node_modules/
+.next/
+dist/
+build/
+coverage/
+.cache/
+*.tsbuildinfo
+graphify-out/
+
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+!.env.*.example
+*.pem
+*.key
+
+# Runtime files and local uploads
+*.log
+uploads/
+
+# Editor and OS files
+.DS_Store
+Thumbs.db

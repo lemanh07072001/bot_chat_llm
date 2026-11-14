@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="vi">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Tiệm Bánh Mộc — demo nhúng Chat Center</title>
+    <style>
+      :root {
+        --ink: #1d1d1f;
+        --muted: #6e6e73;
+        --hairline: rgba(0, 0, 0, 0.08);
+        --accent: #0071e3;
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+        color: var(--ink);
+        background: #fff;
+        line-height: 1.55;
+      }
+      header {
+        border-bottom: 1px solid var(--hairline);
+        padding: 16px 24px;
+        display: flex;
+        align-items: center;
+        gap: 12px;
+      }
+      .logo { font-weight: 650; letter-spacing: -0.01em; }
+      nav { margin-left: auto; display: flex; gap: 20px; font-size: 14px; color: var(--muted); }
+      main { max-width: 760px; margin: 0 auto; padding: 56px 24px 96px; }
+      h1 { font-size: 40px; line-height: 1.15; letter-spacing: -0.02em; margin: 0 0 16px; }
+      .lede { font-size: 18px; color: var(--muted); margin: 0 0 40px; }
+      .note {
+        border: 1px solid var(--hairline);
+        border-radius: 14px;
+        padding: 20px 22px;
+        background: #fbfbfd;
+      }
+      .note h2 { font-size: 15px; margin: 0 0 10px; }
+      pre {
+        margin: 0;
+        padding: 14px;
+        background: #1d1d1f;
+        color: #f5f5f7;
+        border-radius: 10px;
+        font-size: 12.5px;
+        overflow-x: auto;
+      }
+      .hint { font-size: 13px; color: var(--muted); margin: 12px 0 0; }
+      .warn {
+        margin: 24px 0 0;
+        padding: 12px 14px;
+        border-radius: 10px;
+        background: #fff8e6;
+        color: #7a5b00;
+        font-size: 13.5px;
+        display: none;
+      }
+      .warn.visible { display: block; }
+    </style>
+  </head>
+  <body>
+    <header>
+      <span class="logo">🥐 Tiệm Bánh Mộc</span>
+      <nav><span>Sản phẩm</span><span>Về chúng tôi</span><span>Liên hệ</span></nav>
+    </header>
+
+    <main>
+      <h1>Bánh mì nóng giòn, ra lò mỗi 4 tiếng</h1>
+      <p class="lede">
+        Trang này là một website hoàn toàn độc lập, không biết gì về Chat Center. Nó chỉ dán đúng
+        một thẻ script — và có ngay hộp chat realtime ở góc dưới bên phải.
+      </p>
+
+      <div class="note">
+        <h2>Toàn bộ phần tích hợp chỉ có thế này</h2>
+        <pre><code>&lt;script src="http://localhost:3002/v1/widget.js" data-chat-center-key="pk_2f9142afef64fcedf518b1922892e2f8" async&gt;&lt;/script&gt;</code></pre>
+        <p class="hint">
+          Không build, không framework, không CSS của bạn bị ảnh hưởng (widget sống trong Shadow DOM).
+        </p>
+      </div>
+
+      <div class="warn" id="warn"></div>
+    </main>
+
+    <script src="http://localhost:3002/v1/widget.js" data-chat-center-key="pk_2f9142afef64fcedf518b1922892e2f8" async></script>
+  </body>
+</html>

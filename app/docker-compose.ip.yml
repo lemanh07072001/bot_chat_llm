@@ -1,0 +1,83 @@
+name: chat-center
+services:
+  mongo:
+    image: mongo:8
+    restart: unless-stopped
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_ROOT_USERNAME}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_ROOT_PASSWORD}
+    volumes:
+      - mongo-data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--maxmemory", "128mb", "--maxmemory-policy", "allkeys-lru"]
+  api:
+    build:
+      context: .
+      dockerfile: docker/api.Dockerfile
+    restart: unless-stopped
+    env_file: .env.production
+    environment:
+      PORT: "3002"
+      NODE_ENV: production
+      TRUST_PROXY: "1"
+      WIDGET_ASSET_DIR: /srv/widget
+    volumes:
+      - uploads:/srv/api/uploads
+    depends_on:
+      mongo:
+        condition: service_healthy
+      redis:
+        condition: service_started
+  realtime:
+    build:
+      context: .
+      dockerfile: docker/realtime.Dockerfile
+    restart: unless-stopped
+    env_file: .env.production
+    environment:
+      PORT: "3003"
+      NODE_ENV: production
+    depends_on:
+      mongo:
+        condition: service_healthy
+      redis:
+        condition: service_started
+  admin:
+    build:
+      context: .
+      dockerfile: docker/admin.Dockerfile
+      args:
+        NEXT_PUBLIC_API_URL: ${PUBLIC_API_URL}
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      PORT: "3000"
+      HOSTNAME: 0.0.0.0
+      API_URL: http://api:3002/api
+      NEXT_PUBLIC_API_URL: ${PUBLIC_API_URL}
+      PUBLIC_REALTIME_URL: ${PUBLIC_REALTIME_URL}
+      SESSION_COOKIE_SECURE: "false"
+    depends_on:
+      - api
+  nginx:
+    image: nginx:stable-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "8080:8080"
+    volumes:
+      - ./docker/nginx.ip.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      - admin
+      - api
+      - realtime
+volumes:
+  mongo-data:
+  uploads:

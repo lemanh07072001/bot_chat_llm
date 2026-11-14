@@ -1,0 +1,83 @@
+@import "tailwindcss";
+
+:root {
+  --background: #ffffff;
+  --foreground: #171717;
+  --primary: #ea580c;
+  --primary-hover: #c2410c;
+  --primary-light: #fffbeb;
+  --accent-amber: #f59e0b;
+}
+
+::selection {
+  background-color: #ea580c;
+  color: #ffffff;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-primary: var(--primary);
+  --color-primary-hover: var(--primary-hover);
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+}
+
+/**
+ * Flatter corners across the whole panel.
+ *
+ * Tailwind's defaults run 4–16px, which reads soft next to dense tables and
+ * forms. These land everything in the 2–4px range: inputs, buttons and cards
+ * at 4px, small chips and badges at 2–3px. Overriding the tokens rather than
+ * rewriting ~400 `rounded-*` classes keeps the class names meaningful and
+ * stops the old radii creeping back in new code.
+ *
+ * `rounded-full` is intentionally untouched: avatars, status dots, the send
+ * button and pill badges are meant to stay round.
+ */
+@theme {
+  --radius-xs: 2px;
+  --radius-sm: 2px;
+  --radius-md: 2px;
+  --radius-lg: 3px;
+  --radius-xl: 4px;
+  --radius-2xl: 4px;
+  --radius-3xl: 4px;
+  --radius-4xl: 4px;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --background: #0a0a0a;
+    --foreground: #ededed;
+  }
+}
+
+/**
+ * Tailwind v4's preflight sets `cursor: default` on buttons, so every clickable
+ * thing in the panel looked unclickable. Restored once here instead of
+ * repeating `cursor-pointer` on hundreds of elements — and it covers code
+ * written later too.
+ *
+ * Scoped to enabled controls: a disabled button should not invite a click.
+ */
+@layer base {
+  button:not(:disabled),
+  summary,
+  [role="option"]:not([aria-disabled="true"]),
+  [role="menuitem"]:not(:disabled),
+  select:not(:disabled),
+  input[type="checkbox"]:not(:disabled),
+  input[type="radio"]:not(:disabled),
+  input[type="color"]:not(:disabled),
+  input[type="range"]:not(:disabled),
+  input[type="file"]:not(:disabled) {
+    cursor: pointer;
+  }
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+  font-family: Arial, Helvetica, sans-serif;
+}
