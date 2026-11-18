@@ -1,6 +1,55 @@
 # Chat Center — Demos
 
+## Bộ 10 widget demo (`widget-gallery`)
+
+Một trang liệt kê 10 site độc lập, mỗi site có public key, màu chủ đề và lời chào riêng.
+Bấm “Mở chat” để nạp đúng widget của site đó — widget cũ tự đóng trước khi cái mới mở,
+nên bạn kiểm tra được cả 10 màu/tiêu đề mà không cần tải lại trang.
+
+```bash
+cd app/widget && npm run build      # sinh dist/widget.js + dist/widget.mjs (chỉ cần khi sửa widget)
+node demos/seed-widget-sites.mjs    # tạo 10 site trong DB, ghi demos/widget-gallery/sites.json
+node demos/serve.mjs                # chạy từ thư mục gốc dự án
+```
+
+👉 **http://localhost:4500/gallery**
+
+| Địa chỉ | Vai trò |
+|---|---|
+| `http://localhost:4500/gallery` | Trang gallery 10 widget |
+| `http://localhost:4500` | Trang “website khách hàng” mẫu (một key duy nhất) |
+| `http://127.0.0.1:3000/inbox` | Hộp thư admin để trả lời realtime |
+
+Seed script **idempotent**: chạy lại sẽ in `da co` và dùng lại public key cũ, không tạo trùng.
+Nó đăng nhập bằng `demo@chatcenter.local` / `Demo@12345` (đổi qua `ADMIN_EMAIL`,
+`ADMIN_PASSWORD`, `API_URL` nếu cần).
+
+10 site: Tiệm Bánh Mộc · Spa Sen Hồng · Nội Thất Gỗ Việt · Du Lịch Biển Xanh ·
+Phòng Gym Titan · Hiệu Sách Trí Tuệ · Nha Khoa An Nhiên · Cà Phê Mộc Trà ·
+Thời Trang Lụa Việt · Công Nghệ TechOne.
+
+Cả 10 site đều chỉ cho phép origin `http://localhost:4500`, `http://127.0.0.1:4500`,
+`http://localhost:5173`, `http://127.0.0.1:5173` — embed từ origin khác sẽ bị API trả 403.
+
+### Mẫu câu trả lời nhanh cho 10 site
+
+```bash
+node demos/seed-canned-responses.mjs
+```
+
+Tạo bộ **mẫu câu chung** (4 mẫu: `chao`, `doi`, `xong`, `cam-on`) và **3 mẫu riêng cho mỗi
+site demo** (ví dụ Tiệm Bánh Mộc có `gia-banh`, `dat-banh`, `giao-hang`), bật chế độ `both`
+để nhân viên thấy cả hai bộ. Chạy sau `seed-widget-sites.mjs`.
+
+Script idempotent theo *version*: chỉ ghi khi bộ mẫu còn `version = 0` (chưa ai lưu lần nào),
+nên bộ đã sửa hoặc cố ý để trống sẽ không bị ghi đè.
+
+Thử trong admin panel: mở `/inbox`, chọn một hội thoại, bấm nút **Mẫu câu** hoặc gõ
+`/chao` trong ô soạn. Bộ mẫu chung sửa ở `/channels/widget` → nút **Mẫu câu chung**; bộ mẫu
+riêng sửa ở tab **Mẫu câu** của từng dự án.
+
 ## Nhúng widget vào website bất kỳ (`widget-embed`)
+
 
 Một website hoàn toàn độc lập, chỉ dán đúng một thẻ `<script>` để có hộp chat realtime.
 Trang khách, bundle widget và API nằm trên ba origin khác nhau, nên demo này cũng

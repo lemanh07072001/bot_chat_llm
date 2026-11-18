@@ -61,6 +61,75 @@ export class OfficeHours {
 
 export const OfficeHoursSchema = SchemaFactory.createForClass(OfficeHours);
 
+/**
+ * The quick replies staff paste into the composer.
+ *
+ * They live outside `settings` on purpose: `settings` is handed to the public
+ * widget session, and an internal script has no business reaching a visitor.
+ */
+export const CANNED_MAX_TEMPLATES = 30;
+export const CANNED_TEXT_MAX_LENGTH = 4000;
+export const CANNED_TITLE_MAX_LENGTH = 60;
+export const CANNED_SHORTCUT_MAX_LENGTH = 20;
+/** Typed after a `/`, so no spaces, slashes or capitals. */
+export const CANNED_SHORTCUT_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
+
+/** Which sets a project shows in its composer. */
+export type CannedMode = 'global' | 'site' | 'both';
+
+export const CANNED_MODES: CannedMode[] = ['global', 'site', 'both'];
+
+@Schema({ _id: false })
+export class CannedTemplate {
+  /** Optional heading, so a long reply is recognisable in the picker. */
+  @Prop({ trim: true, maxlength: CANNED_TITLE_MAX_LENGTH })
+  title?: string;
+
+  @Prop({ trim: true, lowercase: true, maxlength: CANNED_SHORTCUT_MAX_LENGTH })
+  shortcut?: string;
+
+  @Prop({ required: true, trim: true, maxlength: CANNED_TEXT_MAX_LENGTH })
+  text!: string;
+}
+
+export const CannedTemplateSchema = SchemaFactory.createForClass(CannedTemplate);
+
+/** A project's own set, plus which sets it uses. */
+@Schema({ _id: false })
+export class SiteCannedResponses {
+  @Prop({ type: String, enum: CANNED_MODES, required: true, default: 'global' })
+  mode!: CannedMode;
+
+  @Prop({ type: [CannedTemplateSchema], default: [] })
+  templates!: CannedTemplate[];
+
+  /**
+   * Compare-and-swap counter. Starts at 0 so a document written before this
+   * feature existed and a brand-new one agree on the same starting point.
+   */
+  @Prop({ required: true, default: 0 })
+  version!: number;
+}
+
+export const SiteCannedResponsesSchema =
+  SchemaFactory.createForClass(SiteCannedResponses);
+
+/**
+ * Whether the inbox offers machine translation for this project's threads.
+ *
+ * Nothing is translated automatically and nothing is ever sent to the visitor
+ * on its own: the switch only decides whether the agent sees a "Dịch" button,
+ * so a project whose staff all share one language is not paying for a provider.
+ */
+@Schema({ _id: false })
+export class SiteTranslation {
+  @Prop({ required: true, default: true })
+  enabled!: boolean;
+}
+
+export const SiteTranslationSchema =
+  SchemaFactory.createForClass(SiteTranslation);
+
 @Schema({ timestamps: true })
 export class Site {
   @Prop({ type: Date, default: null })
@@ -88,6 +157,12 @@ export class Site {
 
   @Prop({ type: OfficeHoursSchema, required: true, default: () => ({}) })
   officeHours!: OfficeHours;
+
+  @Prop({ type: SiteCannedResponsesSchema, required: true, default: () => ({}) })
+  cannedResponses!: SiteCannedResponses;
+
+  @Prop({ type: SiteTranslationSchema, required: true, default: () => ({}) })
+  translation!: SiteTranslation;
 
   @Prop({ required: true, default: true })
   active!: boolean;

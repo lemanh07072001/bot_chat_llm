@@ -55,6 +55,8 @@ export interface ChatTheme {
     actionButton: string;
     reactionBar: string;
     reactionBadge: string;
+    /** The block under a bubble that shows a stored translation. */
+    translationBlock: string;
   };
 }
 
@@ -117,6 +119,7 @@ export const CHAT_THEMES: ChatTheme[] = [
       actionButton: "bg-[#161922] hover:bg-[#1E2330] text-neutral-300 border border-white/10 hover:border-white/20",
       reactionBar: "bg-[#161922] border border-white/15 text-neutral-300 shadow-xl",
       reactionBadge: "bg-[#1E2330] border border-white/10 text-neutral-300",
+      translationBlock: "bg-[#12151D] border border-dashed border-indigo-500/30 text-[#E6EDF3]",
     },
   },
 
@@ -178,6 +181,7 @@ export const CHAT_THEMES: ChatTheme[] = [
       actionButton: "bg-white hover:bg-slate-50 text-slate-700 border border-slate-200 shadow-2xs",
       reactionBar: "bg-white border border-slate-200 text-slate-700 shadow-lg",
       reactionBadge: "bg-slate-100 border border-slate-200 text-slate-700",
+      translationBlock: "bg-white border border-dashed border-slate-300 text-slate-700",
     },
   },
 
@@ -239,6 +243,8 @@ export const CHAT_THEMES: ChatTheme[] = [
       actionButton: "bg-white hover:bg-neutral-50 text-neutral-700 border border-neutral-200 rounded-full shadow-2xs",
       reactionBar: "bg-white/90 backdrop-blur-md border border-neutral-200 text-neutral-800 rounded-full shadow-lg",
       reactionBadge: "bg-neutral-100 border border-neutral-200 text-neutral-800 rounded-full",
+      translationBlock:
+        "bg-white/80 border border-dashed border-neutral-300 text-neutral-800 rounded-2xl backdrop-blur-sm",
     },
   },
 
@@ -300,6 +306,7 @@ export const CHAT_THEMES: ChatTheme[] = [
       actionButton: "bg-white hover:bg-slate-100 text-slate-800 border border-slate-300 rounded-md shadow-2xs",
       reactionBar: "bg-white border border-slate-300 text-slate-800 rounded-lg shadow-md",
       reactionBadge: "bg-slate-100 border border-slate-300 text-slate-800 rounded-md",
+      translationBlock: "bg-white border border-dashed border-slate-300 text-slate-800 rounded-md",
     },
   },
 
@@ -361,6 +368,7 @@ export const CHAT_THEMES: ChatTheme[] = [
       actionButton: "bg-white hover:bg-teal-50 text-teal-800 border border-teal-200 rounded-xl shadow-2xs",
       reactionBar: "bg-white border border-teal-200 text-teal-900 rounded-2xl shadow-lg",
       reactionBadge: "bg-teal-50 border border-teal-200 text-teal-800 rounded-full",
+      translationBlock: "bg-teal-50/60 border border-dashed border-teal-300 text-teal-900 rounded-2xl",
     },
   },
 
@@ -422,6 +430,7 @@ export const CHAT_THEMES: ChatTheme[] = [
       actionButton: "bg-white/10 hover:bg-white/20 text-white border border-white/20 rounded-md shadow-2xs",
       reactionBar: "bg-white border border-slate-300 text-slate-800 rounded-md shadow-md",
       reactionBadge: "bg-slate-100 border border-slate-300 text-slate-800 rounded",
+      translationBlock: "bg-white border border-dashed border-slate-300 text-slate-800 rounded",
     },
   },
 
@@ -483,6 +492,7 @@ export const CHAT_THEMES: ChatTheme[] = [
       actionButton: "bg-white hover:bg-[#F7F6F3] text-[#37352F] border border-[#E9E9E7] rounded-lg shadow-2xs",
       reactionBar: "bg-white border border-[#E9E9E7] text-[#37352F] rounded-xl shadow-md",
       reactionBadge: "bg-[#F7F6F3] border border-[#E9E9E7] text-[#37352F] rounded-lg",
+      translationBlock: "bg-[#FBFBFA] border border-dashed border-[#E9E9E7] text-[#37352F] rounded-lg",
     },
   },
 
@@ -544,6 +554,7 @@ export const CHAT_THEMES: ChatTheme[] = [
       actionButton: "bg-white/10 hover:bg-white/20 text-white border border-white/20 rounded-lg shadow-2xs",
       reactionBar: "bg-white border border-[#E3E8EE] text-[#0A2540] rounded-xl shadow-lg",
       reactionBadge: "bg-indigo-50 border border-indigo-200 text-indigo-800 rounded-lg",
+      translationBlock: "bg-indigo-50/60 border border-dashed border-indigo-300 text-indigo-950 rounded-lg",
     },
   },
 
@@ -605,6 +616,7 @@ export const CHAT_THEMES: ChatTheme[] = [
       actionButton: "bg-white hover:bg-amber-50 text-neutral-700 border border-amber-200 rounded-lg shadow-2xs",
       reactionBar: "bg-white border border-amber-200 text-neutral-800 rounded-xl shadow-lg",
       reactionBadge: "bg-amber-50 border border-amber-200 text-amber-900 rounded-lg",
+      translationBlock: "bg-amber-50/70 border border-dashed border-amber-300 text-amber-950 rounded-xl",
     },
   },
 
@@ -666,6 +678,8 @@ export const CHAT_THEMES: ChatTheme[] = [
       actionButton: "bg-[#161724] hover:bg-[#1E2032] text-cyan-300 border border-cyan-500/30 hover:border-cyan-400 rounded-lg shadow-2xs font-mono",
       reactionBar: "bg-[#141522] border border-cyan-500/40 text-cyan-200 rounded-xl shadow-[0_0_20px_rgba(0,240,255,0.2)]",
       reactionBadge: "bg-[#1C1E2E] border border-cyan-500/30 text-cyan-300 font-mono rounded",
+      translationBlock:
+        "bg-[#101225] border border-dashed border-cyan-500/30 text-cyan-100 font-mono rounded",
     },
   },
 ];

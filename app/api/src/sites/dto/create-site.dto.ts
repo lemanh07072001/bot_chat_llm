@@ -81,6 +81,12 @@ export class OfficeHoursDto {
   offlineMessage?: string;
 }
 
+export class TranslationSettingsDto {
+  @IsOptional()
+  @IsBoolean()
+  enabled?: boolean;
+}
+
 export class CreateSiteDto {
   @IsString()
   @IsNotEmpty()
@@ -105,6 +111,11 @@ export class CreateSiteDto {
   @ValidateNested()
   @Type(() => OfficeHoursDto)
   officeHours?: OfficeHoursDto;
+
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => TranslationSettingsDto)
+  translation?: TranslationSettingsDto;
 }
 
 export class UpdateSiteDto {
@@ -132,6 +143,11 @@ export class UpdateSiteDto {
   @ValidateNested()
   @Type(() => OfficeHoursDto)
   officeHours?: OfficeHoursDto;
+
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => TranslationSettingsDto)
+  translation?: TranslationSettingsDto;
 
   @IsOptional()
   @IsBoolean()

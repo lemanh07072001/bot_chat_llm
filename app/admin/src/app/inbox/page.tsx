@@ -33,8 +33,8 @@ export default async function InboxPage({
     redirect("/logout");
   }
 
-  // The sidebar links straight to ?filter=unassigned; after that the tabs are
-  // client state, so switching them does not tear down the socket.
+  // The filter tabs are client state, so switching them does not tear down the
+  // socket; only the first paint reads it from the url.
   const params = await searchParams;
   const filter = isInboxFilter(params.filter) ? params.filter : "all";
 

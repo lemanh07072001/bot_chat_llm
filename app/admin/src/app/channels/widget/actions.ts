@@ -46,6 +46,8 @@ type SitePayload = {
   settings: { title: string; themeColor: string; greeting: string; imageUrl: string };
   /** Omitted by the create form, which does not ask about a schedule. */
   officeHours?: OfficeHours;
+  /** Omitted by the create form; a new project keeps translation on. */
+  translation?: { enabled: boolean };
 };
 
 /**
@@ -141,12 +143,20 @@ function readForm(form: FormData): { payload: SitePayload } | { error: string } 
     return { error: hours.error };
   }
 
+  // Only the edit panel carries the switch; a create form leaves the api's
+  // default (translation on) untouched.
+  const translation =
+    form.get("translationPresent") === "1"
+      ? { enabled: form.get("translationEnabled") === "on" }
+      : null;
+
   return {
     payload: {
       name,
       allowedOrigins,
       settings: { title, themeColor, greeting, imageUrl },
       ...(hours.officeHours ? { officeHours: hours.officeHours } : {}),
+      ...(translation ? { translation } : {}),
     },
   };
 }

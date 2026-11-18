@@ -2,7 +2,7 @@
 
 import React, { useState } from "react";
 import Link from "next/link";
-import { usePathname, useSearchParams } from "next/navigation";
+import { usePathname } from "next/navigation";
 import {
   MessageSquare,
   ChevronLeft,
@@ -37,9 +37,6 @@ export function Sidebar({
   onOpenSearch?: () => void;
 }) {
   const pathname = usePathname();
-  const searchParams = useSearchParams();
-  // Two links point at /inbox and differ only by ?filter, so the comparison has
-  // to include the query — usePathname never does.
   const unreadCounts = useUnreadCounts();
   const [agentStatus, setAgentStatus] = useState<"online" | "busy" | "away">("online");
 
@@ -220,9 +217,8 @@ export function Sidebar({
 
               <div className="space-y-0.5">
                 {group.items.map((item) => {
-                  const isActive = isNavigationActive(item.href, pathname, new URLSearchParams(searchParams.toString()));
-                  const unread = item.href === "/inbox" ? unreadCounts.unread
-                    : item.href === "/inbox?filter=unassigned" ? unreadCounts.unassignedUnread : 0;
+                  const isActive = isNavigationActive(item.href, pathname);
+                  const unread = item.href === "/inbox" ? unreadCounts.unread : 0;
                   const badge = unread > 0 ? (unread > 99 ? "99+" : unread) : item.badge;
                   const Icon = item.icon;
 

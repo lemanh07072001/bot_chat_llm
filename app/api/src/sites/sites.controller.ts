@@ -73,6 +73,7 @@ export class SitesController {
       allowedOrigins: dto.allowedOrigins,
       settings: dto.settings,
       officeHours: dto.officeHours,
+      translation: dto.translation,
     });
 
     return this.present(site, 'owner');
@@ -275,8 +276,13 @@ export class SitesController {
     // document type does not express.
     const json = site.toJSON() as unknown as Record<string, unknown>;
 
+    // Up to 30 replies of 4000 characters would dwarf the rest of the payload
+    // on every list and detail read. The composer reads them from
+    // /canned-responses/effective instead.
+    const { cannedResponses: _cannedResponses, ...withoutCanned } = json;
+
     if (access === 'manager') {
-      const { publicKey: _publicKey, allowedOrigins: _allowedOrigins, ownerId: _ownerId, ...rest } = json;
+      const { publicKey: _publicKey, allowedOrigins: _allowedOrigins, ownerId: _ownerId, ...rest } = withoutCanned;
 
       return { ...rest, ...extra, access };
     }
@@ -291,7 +297,7 @@ export class SitesController {
         : '';
 
     return {
-      ...json,
+      ...withoutCanned,
       ...extra,
       access,
       embedSnippet: `<script src="${escapeAttribute(widgetUrl)}"${apiAttribute} data-chat-center-key="${site.publicKey}" async></script>`,

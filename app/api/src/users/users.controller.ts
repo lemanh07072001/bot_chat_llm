@@ -6,6 +6,21 @@ import type { JwtPayload } from '../auth/jwt-payload.type.js';
 import { CreateManagedUserDto, UpdateManagedUserDto } from './manage-user.dto.js';
 import { UsersService } from './users.service.js';
 import { ChangeOwnPasswordDto, UpdateOwnPreferencesDto, UpdateSelfProfileDto } from './self-service.dto.js';
+import { normalizeTemplates } from '../canned-responses/canned-templates.js';
+
+/**
+ * An older client sends reply bodies only. Writing the template list from them
+ * keeps the two shapes in step — without it the newer editor would keep showing
+ * the replies that client just replaced.
+ */
+function legacyTemplates(texts: string[]) {
+  const trimmed = texts.map((text) => text.trim());
+
+  return {
+    cannedResponses: trimmed,
+    cannedResponseTemplates: trimmed.map((text) => ({ text })),
+  };
+}
 
 @Controller('users')
 export class UsersController {
@@ -20,9 +35,26 @@ export class UsersController {
 
   @Patch('me/preferences')
   async updatePreferences(@CurrentUser() actor: JwtPayload, @Body() dto: UpdateOwnPreferencesDto) {
+    // Saving the newer shape also refreshes the plain-text list, so a client
+    // that only knows `cannedResponses` shows the same replies instead of the
+    // ones from before the edit.
+    const templates = dto.cannedResponseTemplates;
+    const normalized = templates ? normalizeTemplates(templates) : undefined;
+
     const user = await this.users.updateSelf(actor.sub, {
       ...(dto.soundEnabled !== undefined ? { soundEnabled: dto.soundEnabled } : {}),
-      ...(dto.cannedResponses !== undefined ? { cannedResponses: dto.cannedResponses.map((text) => text.trim()) } : {}),
+      ...(normalized
+        ? {
+            cannedResponseTemplates: normalized,
+            cannedResponses: normalized.map((template) => template.text),
+          }
+        : {}),
+      ...(!normalized && dto.cannedResponses !== undefined
+        ? legacyTemplates(dto.cannedResponses)
+        : {}),
+      ...(dto.translationLanguage !== undefined
+        ? { translationLanguage: dto.translationLanguage }
+        : {}),
     });
     if (!user) throw new NotFoundException();
     return user.toJSON();

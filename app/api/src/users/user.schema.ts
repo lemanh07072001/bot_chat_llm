@@ -1,5 +1,6 @@
 import { Prop, Schema, SchemaFactory } from '@nestjs/mongoose';
 import { HydratedDocument } from 'mongoose';
+import { CannedTemplate, CannedTemplateSchema } from '../sites/site.schema.js';
 
 export type UserDocument = HydratedDocument<User>;
 
@@ -46,8 +47,29 @@ export class User {
   @Prop({ type: Boolean, default: true })
   soundEnabled!: boolean;
 
+  /**
+   * Kept for accounts written before templates carried a title and a shortcut.
+   * Read only when `cannedResponseTemplates` is absent; both are shipped so an
+   * older client still sees the same texts.
+   */
   @Prop({ type: [String], default: undefined })
   cannedResponses?: string[];
+
+  /**
+   * The agent's own set. `undefined` means "never chose", which falls back to
+   * the built-in starter replies; `[]` means "deliberately empty".
+   */
+  @Prop({ type: [CannedTemplateSchema], default: undefined })
+  cannedResponseTemplates?: CannedTemplate[];
+
+  /**
+   * The language this agent reads and writes in, e.g. `vi`.
+   *
+   * Translation is opt-in per person: an agent who has never chosen keeps the
+   * default, and a null/absent value simply means the UI offers Vietnamese.
+   */
+  @Prop({ trim: true, maxlength: 8, default: undefined })
+  translationLanguage?: string;
 
   @Prop({ required: true, unique: true, lowercase: true, trim: true })
   email!: string;

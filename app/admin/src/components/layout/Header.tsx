@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import {
   Menu,
   Search,
@@ -10,6 +10,7 @@ import {
 import { logout } from "@/app/(auth)/actions";
 import { SidebarUser } from "./Sidebar";
 import { AccountDialog } from "./AccountDialog";
+import { OPEN_ACCOUNT_PREFERENCES_EVENT } from "@/components/inbox/CannedPicker";
 
 interface HeaderProps {
   user?: SidebarUser;
@@ -20,6 +21,17 @@ interface HeaderProps {
 export function Header({ user, onOpenMobile, onOpenSearch }: HeaderProps) {
   const [showNotifications, setShowNotifications] = useState(false);
   const [showAccount, setShowAccount] = useState(false);
+  const [accountTab, setAccountTab] = useState("profile");
+
+  // The inbox composer cannot reach this dialog, so it asks for it by event.
+  useEffect(() => {
+    const listener = () => {
+      setAccountTab("preferences");
+      setShowAccount(true);
+    };
+    window.addEventListener(OPEN_ACCOUNT_PREFERENCES_EVENT, listener);
+    return () => window.removeEventListener(OPEN_ACCOUNT_PREFERENCES_EVENT, listener);
+  }, []);
 
   const initials = user?.name
     ? user.name
@@ -140,7 +152,15 @@ export function Header({ user, onOpenMobile, onOpenSearch }: HeaderProps) {
           </form>
         </div>
       </div>
-      {showAccount && <AccountDialog onClose={() => setShowAccount(false)} />}
+      {showAccount && (
+        <AccountDialog
+          initialTab={accountTab}
+          onClose={() => {
+            setShowAccount(false);
+            setAccountTab("profile");
+          }}
+        />
+      )}
     </header>
   );
 }

@@ -19,6 +19,7 @@ import {
   Copy,
   Globe,
   Key,
+  Languages,
   Lock,
   Package,
   Palette,
@@ -29,6 +30,7 @@ import {
   RefreshCw,
   ShieldAlert,
   ShieldCheck,
+  Sparkles,
   Trash2,
   UserPlus,
   Users,
@@ -66,6 +68,7 @@ import {
 import { SiteImage, SiteImageField, useSiteImage } from "./site-image";
 import { WidgetPreview } from "./widget-preview";
 import { TelegramTab } from "./telegram-tab";
+import { CannedTab, GlobalCannedDialog } from "./canned-tab";
 
 /** A staff account that can be granted access to a project. */
 export type StaffRef = { id: string; name: string; email: string; role: string };
@@ -78,7 +81,7 @@ type MemberView = {
   addedAt: string | null;
 };
 
-type SiteTab = "embed" | "config" | "people" | "operations" | "telegram";
+type SiteTab = "embed" | "config" | "people" | "canned" | "operations" | "telegram";
 
 const THEME_PRESETS = ["#EA580C", "#16A34A", "#9333EA", "#EA580C", "#DC2626", "#0F172A"];
 
@@ -736,6 +739,7 @@ function ConfigTab({
   const [state, formAction, pending] = useActionState(saveSite, {});
   const formState = useSiteFormState(site);
   const hoursState = useOfficeHoursState(site);
+  const [translationEnabled, setTranslationEnabled] = useState(site.translation?.enabled ?? true);
   const [previewOutsideHours, setPreviewOutsideHours] = useState(false);
   const router = useRouter();
 
@@ -763,6 +767,23 @@ function ConfigTab({
             <span className="text-xs font-medium text-[#1D1D1F]">Giờ làm việc</span>
           </div>
           <OfficeHoursFields state={hoursState} />
+        </div>
+
+        <div>
+          <div className="flex items-center gap-1.5 mb-1.5">
+            <Languages className="w-3.5 h-3.5 text-[#86868B]" />
+            <span className="text-xs font-medium text-[#1D1D1F]">Dịch hội thoại</span>
+          </div>
+          <div className="rounded-xl border border-black/[0.06] p-3.5">
+            <input type="hidden" name="translationPresent" value="1" />
+            <CheckboxField
+              name="translationEnabled"
+              checked={translationEnabled}
+              onChange={setTranslationEnabled}
+              label="Cho phép nhân viên dịch tin nhắn của dự án này"
+              description="Nút Dịch trong hộp thư chuyển tin của khách sang ngôn ngữ nhân viên đọc. Bản dịch chỉ hiện ở phía nhân viên, không bao giờ tự gửi cho khách. Tắt ở đây khi dự án không được phép gửi nội dung ra nhà cung cấp dịch bên ngoài."
+            />
+          </div>
         </div>
 
         <FormFeedback state={state} />
@@ -1188,6 +1209,7 @@ function OwnerSiteDetail({
               { key: "embed", label: "Mã nhúng", icon: Code2 },
               { key: "config", label: "Cấu hình", icon: Palette },
               { key: "people", label: "Người phụ trách", icon: Users, badge: site.memberCount },
+              { key: "canned", label: "Mẫu câu", icon: Sparkles },
               { key: "operations", label: "Vận hành", icon: Key },
               { key: "telegram", label: "Telegram", icon: Globe },
             ]}
@@ -1199,6 +1221,7 @@ function OwnerSiteDetail({
         {tab === "embed" && <EmbedTab site={site} />}
         {tab === "config" && <ConfigTab site={site} onNotify={onNotify} />}
         {tab === "people" && <PeopleTab site={site} staff={staff} onNotify={onNotify} />}
+        {tab === "canned" && <CannedTab key={site.id} siteId={site.id} siteName={site.name} />}
         {tab === "telegram" && <TelegramTab key={site.id} siteId={site.id} staff={staff} />}
         {tab === "operations" && (
           <OperationsTab
@@ -1256,6 +1279,7 @@ export function SitesClient({
 
   const [contextMenu, setContextMenu] = useState<{ site: Site; x: number; y: number } | null>(null);
   const [deletingSite, setDeletingSite] = useState<OwnedSite | null>(null);
+  const [showGlobalCanned, setShowGlobalCanned] = useState(false);
   const [menuPending, startMenuAction] = useTransition();
   const router = useRouter();
 
@@ -1330,6 +1354,15 @@ export function SitesClient({
               <CircleDot className="w-3 h-3" />
               {sites.length} dự án
             </span>
+
+            <button
+              type="button"
+              onClick={() => setShowGlobalCanned(true)}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl border border-neutral-200 text-[#1D1D1F] text-xs font-medium hover:bg-[#F5F5F7] transition"
+            >
+              <Sparkles className="w-3.5 h-3.5 text-[#EA580C]" />
+              <span>Mẫu câu chung</span>
+            </button>
 
             <button
               type="button"
@@ -1536,6 +1569,16 @@ export function SitesClient({
                 }}
               />
 
+              <MenuItem
+                icon={Sparkles}
+                label="Mẫu câu"
+                hint="Bộ mẫu riêng của dự án"
+                onClick={() => {
+                  setTab("canned");
+                  setContextMenu(null);
+                }}
+              />
+
               <MenuSeparator />
 
               <MenuItem
@@ -1591,6 +1634,8 @@ export function SitesClient({
           }
         />
       )}
+
+      {showGlobalCanned && <GlobalCannedDialog onClose={() => setShowGlobalCanned(false)} />}
 
       {creating && (
         <CreateSiteModal

@@ -9,6 +9,8 @@ import { SitesModule } from './sites/sites.module.js';
 import { ChatModule } from './chat/chat.module.js';
 import { WidgetModule } from './widget/widget.module.js';
 import { TelegramModule } from './telegram/telegram.module.js';
+import { CannedResponsesModule } from './canned-responses/canned-responses.module.js';
+import { TranslationModule } from './translation/translation.module.js';
 
 import { RealtimeSharedModule } from './realtime/realtime-shared.module.js';
 
@@ -21,6 +23,8 @@ import { RealtimeSharedModule } from './realtime/realtime-shared.module.js';
       inject: [ConfigService],
       useFactory: (config: ConfigService) => ({
         uri: config.getOrThrow<string>('MONGODB_URI'),
+        // Fail fast (~5s) instead of Mongoose's 30s default when Mongo is down
+        serverSelectionTimeoutMS: 5000,
       }),
     }),
     AuthModule,
@@ -28,6 +32,8 @@ import { RealtimeSharedModule } from './realtime/realtime-shared.module.js';
     ChatModule,
     WidgetModule,
     TelegramModule,
+    CannedResponsesModule,
+    TranslationModule,
 
   ],
   controllers: [AppController],

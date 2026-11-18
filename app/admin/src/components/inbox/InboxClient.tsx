@@ -42,6 +42,7 @@ import {
   Italic,
   Code,
   Quote,
+  Languages,
 } from "lucide-react";
 import type {
   ChatMessage,
@@ -50,10 +51,29 @@ import type {
   InboxFilter,
   ProjectRef,
 } from "@/lib/chat";
-import { INBOX_FILTERS, filterToQuery, matchesFilter, visitorLabel } from "@/lib/chat";
+import { INBOX_FILTERS, filterToQuery, matchesFilter, translationFor, visitorLabel } from "@/lib/chat";
 import { InternalNotes } from "./InternalNotes";
-import { DEFAULT_CANNED_RESPONSES, type AccountPreferences } from "./preferences";
+import { type AccountPreferences } from "./preferences";
+import {
+  DEFAULT_TRANSLATION_LANGUAGE,
+  detectLanguage,
+  isTranslationLanguage,
+  translationIsEnabled,
+  translationLanguageLabel,
+} from "@/lib/translation";
 import { getChatTheme, type ChatTheme } from "./chatThemes";
+import {
+  DEFAULT_CANNED_TEMPLATES,
+  cannedGroups,
+  findSlashQuery,
+  insertCannedText,
+  resolvePersonalTemplates,
+  searchCanned,
+  type CannedHit,
+  type CannedTemplate,
+  type SlashQuery,
+} from "@/lib/canned";
+import { CannedPickerPanel, CannedSuggestions, useEffectiveCanned } from "./CannedPicker";
 
 interface CurrentUser {
   id: string;
@@ -226,7 +246,10 @@ export function InboxClient({
   const searchRef = useRef("");
   const listRequestVersion = useRef(0);
   const [soundEnabled, setSoundEnabled] = useState(true);
-  const [cannedResponses, setCannedResponses] = useState(DEFAULT_CANNED_RESPONSES);
+  const [translationLanguage, setTranslationLanguage] = useState(DEFAULT_TRANSLATION_LANGUAGE);
+  const [personalTemplates, setPersonalTemplates] = useState<CannedTemplate[]>(
+    DEFAULT_CANNED_TEMPLATES,
+  );
   const preferencesRef = useRef<AccountPreferences | null>(null);
   const [savingSound, setSavingSound] = useState(false);
   const [showRightSidebar, setShowRightSidebar] = useState(true);
@@ -249,7 +272,14 @@ export function InboxClient({
     const apply = (preferences: AccountPreferences) => {
       preferencesRef.current = preferences;
       setSoundEnabled(preferences.soundEnabled ?? true);
-      setCannedResponses(preferences.cannedResponses ?? DEFAULT_CANNED_RESPONSES);
+      setPersonalTemplates(resolvePersonalTemplates(preferences));
+      // The stored preference is the language this agent reads; a blank value
+      // (or one from a newer build) falls back to the house default.
+      setTranslationLanguage(
+        isTranslationLanguage(preferences.translationLanguage ?? "")
+          ? String(preferences.translationLanguage)
+          : DEFAULT_TRANSLATION_LANGUAGE,
+      );
     };
     const listener = (event: Event) => {
       controller.abort();
@@ -942,9 +972,14 @@ export function InboxClient({
             </div>
           ) : (
             <ConversationThread
-              cannedResponses={cannedResponses}
+              personalTemplates={personalTemplates}
+              siteName={projects.find((project) => project.id === selected.siteId)?.name}
               key={selected.id}
               conversation={selected}
+              translationLanguage={translationLanguage}
+              siteTranslationEnabled={
+                projects.find((project) => project.id === selected.siteId)?.translation !== false
+              }
               initialThread={initialThread?.conversation.id === selected.id ? initialThread : null}
               isProjectOwner={
                 projects.find((project) => project.id === selected.siteId)?.access === "owner"
@@ -980,7 +1015,12 @@ export function InboxClient({
 }
 
 interface ConversationThreadProps {
-  cannedResponses: string[];
+  personalTemplates: CannedTemplate[];
+  siteName?: string;
+  /** The language this agent reads; translations display in it. */
+  translationLanguage: string;
+  /** False when the project opted out of machine translation. */
+  siteTranslationEnabled: boolean;
   initialThread?: InitialThread | null;
   conversation: Conversation;
   isProjectOwner: boolean;
@@ -998,6 +1038,15 @@ interface ConversationThreadProps {
   ) => Promise<void>;
   currentTheme: ChatTheme;
 }
+
+/** A translated draft, kept apart from the draft itself so nothing is lost. */
+type DraftTranslation = {
+  /** The draft this was made from; an edit marks the panel stale. */
+  source: string;
+  text: string;
+  target: string;
+  same: boolean;
+};
 
 function formatDateDivider(iso: string): string {
   try {
@@ -1023,7 +1072,10 @@ function formatDateDivider(iso: string): string {
 }
 
 function ConversationThread({
-  cannedResponses,
+  personalTemplates,
+  siteName,
+  translationLanguage,
+  siteTranslationEnabled,
   conversation,
   initialThread,
   isProjectOwner,
@@ -1049,6 +1101,8 @@ function ConversationThread({
   const [busy, setBusy] = useState(false);
   const [assigning, setAssigning] = useState(false);
   const [showCannedMenu, setShowCannedMenu] = useState(false);
+  const [slash, setSlash] = useState<SlashQuery | null>(null);
+  const [slashIndex, setSlashIndex] = useState(0);
   const [showEmojiPicker, setShowEmojiPicker] = useState(false);
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [reactions, setReactions] = useState<Record<string, Record<string, number>>>({});
@@ -1069,6 +1123,145 @@ function ConversationThread({
   const label = visitorLabel(conversation);
   const initials = getInitials(label);
   const palette = getAvatarPalette(label);
+
+  // The project's own set and the shared set, already narrowed by the mode the
+  // project chose. Null until loaded (or if the call failed), in which case the
+  // picker still offers the agent's own replies.
+  const effective = useEffectiveCanned(conversation.siteId);
+  const groups = useMemo(
+    () => cannedGroups({ personal: personalTemplates, effective, siteName }),
+    [personalTemplates, effective, siteName],
+  );
+  const slashHits = useMemo<CannedHit[]>(
+    () => (slash ? searchCanned(groups, slash.query).slice(0, 8) : []),
+    [slash, groups],
+  );
+
+  // --- Translation ---------------------------------------------------------
+  // Nothing here sends anything to the visitor: a translation is displayed for
+  // the agent, or placed in the draft for them to review and send themselves.
+  const [translationReady, setTranslationReady] = useState(false);
+  const [translatingId, setTranslatingId] = useState<string | null>(null);
+  const [hiddenTranslations, setHiddenTranslations] = useState<Record<string, true>>({});
+  /** Messages the api answered "already in your language" for. */
+  const [sameLanguageIds, setSameLanguageIds] = useState<Record<string, true>>({});
+  const [draftTranslation, setDraftTranslation] = useState<DraftTranslation | null>(null);
+  const [translatingDraft, setTranslatingDraft] = useState(false);
+
+  useEffect(() => {
+    let alive = true;
+    translationIsEnabled().then((enabled) => {
+      if (alive) setTranslationReady(enabled);
+    });
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  // Both have to say yes: the install must have a provider, and this project's
+  // owner must allow its threads to be sent to that provider.
+  const translationEnabled = translationReady && siteTranslationEnabled;
+
+  /**
+   * Best guess at the visitor's language, taken from what they last wrote. Used
+   * as the target of a reply the agent wants translated before sending.
+   */
+  const visitorLanguage = useMemo(() => {
+    for (let index = messages.length - 1; index >= 0; index -= 1) {
+      const message = messages[index];
+      if (message.senderKind === "visitor" && message.body.trim()) {
+        return detectLanguage(message.body);
+      }
+    }
+    return "en";
+  }, [messages]);
+
+  async function translateOne(message: ChatMessage) {
+    if (translatingId) return;
+    setTranslatingId(message.id);
+
+    try {
+      const response = await fetch(
+        `/api/conversations/${conversationId}/messages/${message.id}/translate`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ target: translationLanguage }),
+        },
+      );
+      const data = (await response.json().catch(() => null)) as
+        | { message?: ChatMessage; translation?: { same?: boolean }; error?: string }
+        | null;
+
+      if (!response.ok || !data?.message) {
+        onError(data?.error ?? "Không dịch được tin nhắn.");
+        return;
+      }
+
+      const updated = data.message;
+
+      // The api returns the message untouched when it already reads in the
+      // agent's language; saying so beats a button that appears to do nothing.
+      if (data.translation?.same) {
+        setSameLanguageIds((previous) => ({ ...previous, [message.id]: true }));
+        return;
+      }
+
+      setMessages((previous) =>
+        previous.map((item) =>
+          item.id === updated.id ? { ...item, translations: updated.translations } : item,
+        ),
+      );
+      setHiddenTranslations((previous) => {
+        const next = { ...previous };
+        delete next[message.id];
+        return next;
+      });
+      setSameLanguageIds((previous) => {
+        const next = { ...previous };
+        delete next[message.id];
+        return next;
+      });
+    } catch {
+      onError("Không kết nối được máy chủ dịch.");
+    } finally {
+      setTranslatingId(null);
+    }
+  }
+
+  async function translateDraft() {
+    const text = draft.trim();
+    if (!text || translatingDraft) return;
+
+    setTranslatingDraft(true);
+
+    try {
+      const response = await fetch("/api/translation", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text, target: visitorLanguage }),
+      });
+      const data = (await response.json().catch(() => null)) as
+        | { text?: string; target?: string; same?: boolean; error?: string }
+        | null;
+
+      if (!response.ok || typeof data?.text !== "string") {
+        onError(data?.error ?? "Không dịch được bản nháp.");
+        return;
+      }
+
+      setDraftTranslation({
+        source: text,
+        text: data.text,
+        target: data.target ?? visitorLanguage,
+        same: Boolean(data.same),
+      });
+    } catch {
+      onError("Không kết nối được máy chủ dịch.");
+    } finally {
+      setTranslatingDraft(false);
+    }
+  }
 
   useEffect(() => {
     let cancelled = false;
@@ -1161,13 +1354,27 @@ function ConversationThread({
       }
     };
 
+    // Translations are stored server-side and announced to the project's agents
+    // instead of the conversation room, so a second agent sees them without a
+    // refetch — and visitors never receive the agent's language.
+    const onMessageUpdated = (message: ChatMessage) => {
+      if (message.conversationId !== conversationId) return;
+      setMessages((previous) =>
+        previous.map((item) =>
+          item.id === message.id ? { ...item, translations: message.translations } : item,
+        ),
+      );
+    };
+
     socket.on("message:new", onMessage);
+    socket.on("message:updated", onMessageUpdated);
     socket.on("typing", onTyping);
     socket.on("ready", join);
     join();
 
     return () => {
       socket.off("message:new", onMessage);
+      socket.off("message:updated", onMessageUpdated);
       socket.off("typing", onTyping);
       socket.off("ready", join);
       socket.emit("conversation:leave", { conversationId });
@@ -1265,6 +1472,7 @@ function ConversationThread({
     if (!body || !socket?.connected) return;
 
     setDraft("");
+    setSlash(null);
     if (textareaRef.current) {
       textareaRef.current.style.height = "68px";
     }
@@ -1299,10 +1507,31 @@ function ConversationThread({
     setBusy(false);
   };
 
-  const handleInsertCanned = (text: string) => {
-    setDraft((prev) => (prev ? `${prev} ${text}` : text));
+  /**
+   * Drops a reply where the caret is.
+   *
+   * `range` is the `/shortcut` text to replace; without it the reply lands at
+   * the caret rather than being appended, which is where the agent was typing.
+   */
+  const insertCanned = (template: CannedTemplate, range?: { start: number; end: number }) => {
+    const element = textareaRef.current;
+    const start = range?.start ?? element?.selectionStart ?? draft.length;
+    const end = range?.end ?? element?.selectionEnd ?? start;
+    const next = insertCannedText({ value: draft, start, end, text: template.text });
+
+    setDraft(next.value);
+    setSlash(null);
+    setSlashIndex(0);
     setShowCannedMenu(false);
-    textareaRef.current?.focus();
+
+    // The textarea is controlled, so the caret can only be placed after React
+    // has painted the new value.
+    requestAnimationFrame(() => {
+      const input = textareaRef.current;
+      if (!input) return;
+      input.focus();
+      input.setSelectionRange(next.caret, next.caret);
+    });
   };
 
   const handleInsertEmoji = (emoji: string) => {
@@ -1547,6 +1776,12 @@ function ConversationThread({
                 const msgReactions = reactions[message.id] || {};
                 const reactionKeys = Object.keys(msgReactions);
 
+                // A translation is fetched once and stored on the message, so
+                // reopening the conversation shows it without paying again.
+                const storedTranslation = translationFor(message, translationLanguage);
+                const translationShown =
+                  Boolean(storedTranslation) && !hiddenTranslations[message.id];
+
                 return (
                   <Fragment key={message.id}>
                     {showDivider && (
@@ -1605,6 +1840,54 @@ function ConversationThread({
                               <span className="text-[9px] text-emerald-500 font-medium">Đã chép</span>
                             )}
                           </button>
+                          {translationEnabled && message.body.trim() && (
+                            <>
+                              <span className="w-px h-3 bg-neutral-300 dark:bg-white/20 mx-0.5" />
+                              <button
+                                type="button"
+                                disabled={translatingId === message.id}
+                                onClick={() => {
+                                  if (!storedTranslation) {
+                                    void translateOne(message);
+                                    return;
+                                  }
+                                  // Already translated: the header button only
+                                  // folds the block away without refetching.
+                                  setHiddenTranslations((previous) => {
+                                    const next = { ...previous };
+                                    if (next[message.id]) delete next[message.id];
+                                    else next[message.id] = true;
+                                    return next;
+                                  });
+                                }}
+                                className="p-1 hover:text-amber-600 transition cursor-pointer text-[10px] flex items-center gap-0.5 disabled:opacity-50"
+                                title={
+                                  sameLanguageIds[message.id]
+                                    ? "Tin nhắn đã ở ngôn ngữ bạn đọc"
+                                    : storedTranslation
+                                      ? translationShown
+                                        ? "Ẩn bản dịch"
+                                        : "Hiện bản dịch"
+                                      : `Dịch sang ${translationLanguageLabel(translationLanguage)}`
+                                }
+                              >
+                                {translatingId === message.id ? (
+                                  <Loader2 className="w-3 h-3 animate-spin" />
+                                ) : (
+                                  <Languages className="w-3 h-3" />
+                                )}
+                                <span className="text-[9px]">
+                                  {storedTranslation
+                                    ? translationShown
+                                      ? "Ẩn"
+                                      : "Hiện"
+                                    : sameLanguageIds[message.id]
+                                      ? "Trùng"
+                                      : "Dịch"}
+                                </span>
+                              </button>
+                            </>
+                          )}
                         </div>
 
                         {/* Sender Label */}
@@ -1628,6 +1911,34 @@ function ConversationThread({
                         >
                           {message.body}
                         </div>
+
+                        {/* Stored Translation — visible to the agent only */}
+                        {storedTranslation && translationShown && (
+                          <div
+                            className={`mt-1 rounded-xl border border-dashed px-3 py-2 text-xs sm:text-[13px] leading-relaxed whitespace-pre-wrap [overflow-wrap:anywhere] ${currentTheme.classes.translationBlock}`}
+                          >
+                            <div className="flex items-center justify-between gap-2 mb-1">
+                              <span className="inline-flex items-center gap-1 text-[10px] font-medium uppercase tracking-wide opacity-70">
+                                <Languages className="w-3 h-3" />
+                                Bản dịch · {translationLanguageLabel(storedTranslation.lang)}
+                              </span>
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  setHiddenTranslations((previous) => ({
+                                    ...previous,
+                                    [message.id]: true,
+                                  }))
+                                }
+                                className="text-[10px] opacity-60 hover:opacity-100 cursor-pointer"
+                                title="Ẩn bản dịch này"
+                              >
+                                Ẩn
+                              </button>
+                            </div>
+                            {storedTranslation.text}
+                          </div>
+                        )}
 
                         {/* Reaction Badges */}
                         {reactionKeys.length > 0 && (
@@ -1720,15 +2031,146 @@ function ConversationThread({
         <div
           className={`transition-all flex flex-col overflow-hidden ${currentTheme.classes.composerInner}`}
         >
+          {/* Slash suggestions, kept inside the composer so they scroll with it */}
+          {slash && (
+            <CannedSuggestions
+              hits={slashHits}
+              activeIndex={slashIndex}
+              onHover={setSlashIndex}
+              onPick={(template) =>
+                insertCanned(template, {
+                  start: slash.start,
+                  end: slash.start + slash.query.length + 1,
+                })
+              }
+            />
+          )}
+
+          {/* Draft translation, reviewed before anything is sent */}
+          {draftTranslation && (
+            <div className="mx-3 mt-2 rounded-xl border border-dashed border-amber-300 bg-amber-50/70 px-3 py-2 text-xs">
+              <div className="flex items-center justify-between gap-2 mb-1">
+                <span className="inline-flex items-center gap-1 text-[10px] font-medium uppercase tracking-wide text-amber-800">
+                  <Languages className="w-3 h-3" />
+                  {draftTranslation.same
+                    ? "Bản nháp đã là ngôn ngữ của khách"
+                    : `Bản dịch · ${translationLanguageLabel(draftTranslation.target)}`}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setDraftTranslation(null)}
+                  className="text-[10px] text-amber-800/70 hover:text-amber-900 cursor-pointer"
+                >
+                  Đóng
+                </button>
+              </div>
+              <p className="text-[#1D1D1F] leading-relaxed whitespace-pre-wrap [overflow-wrap:anywhere]">
+                {draftTranslation.text}
+              </p>
+              {draftTranslation.source !== draft.trim() && (
+                <p className="mt-1 text-[10px] text-amber-800">
+                  Bản nháp đã sửa sau khi dịch — bấm Dịch để cập nhật.
+                </p>
+              )}
+              {!draftTranslation.same && (
+                <div className="flex gap-2 mt-2">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      // Replaces the draft and nothing more: sending is still
+                      // the agent's Enter, so a translation never leaves alone.
+                      setDraft(draftTranslation.text);
+                      setDraftTranslation(null);
+                      setSlash(null);
+                      textareaRef.current?.focus();
+                    }}
+                    className="rounded-lg bg-amber-600 hover:bg-amber-700 px-2.5 py-1 text-[11px] font-medium text-white cursor-pointer"
+                  >
+                    Dùng bản dịch
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => void navigator.clipboard?.writeText(draftTranslation.text)}
+                    className="rounded-lg border border-amber-300 px-2.5 py-1 text-[11px] font-medium text-amber-900 cursor-pointer"
+                  >
+                    Sao chép
+                  </button>
+                </div>
+              )}
+            </div>
+          )}
+
           {/* Auto-resizing Textarea */}
           <textarea
             ref={textareaRef}
             value={draft}
             onChange={(event) => {
-              setDraft(event.target.value);
+              const value = event.target.value;
+              setDraft(value);
+              setSlash(findSlashQuery(value, event.target.selectionStart ?? value.length));
+              setSlashIndex(0);
               notifyTyping();
             }}
+            onSelect={(event) => {
+              // Moving the caret out of a `/command` has to dismiss the list;
+              // otherwise Enter would insert into a range the agent left behind.
+              const input = event.currentTarget;
+              const next = findSlashQuery(input.value, input.selectionStart ?? input.value.length);
+
+              if (!next) {
+                if (slash) setSlash(null);
+                return;
+              }
+
+              if (slash?.start !== next.start || slash.query !== next.query) setSlashIndex(0);
+              setSlash(next);
+            }}
             onKeyDown={(event) => {
+              // A Vietnamese IME commits a word with Enter; sending on that
+              // keystroke would fire a half-written reply.
+              if (event.nativeEvent.isComposing || event.keyCode === 229) return;
+
+              if (slash) {
+                if (event.key === "ArrowDown" && slashHits.length > 0) {
+                  event.preventDefault();
+                  setSlashIndex((index) => (index + 1) % slashHits.length);
+                  return;
+                }
+                if (event.key === "ArrowUp" && slashHits.length > 0) {
+                  event.preventDefault();
+                  setSlashIndex((index) => (index - 1 + slashHits.length) % slashHits.length);
+                  return;
+                }
+                if (event.key === "Enter" || event.key === "Tab") {
+                  // The list is open, so Enter picks a reply instead of sending
+                  // a message that still contains the `/command` text.
+                  event.preventDefault();
+
+                  const hit = slashHits[slashIndex] ?? slashHits[0];
+
+                  if (!hit) {
+                    setSlash(null);
+                    return;
+                  }
+
+                  // Re-read the caret: the range stored with the list can be
+                  // stale if the agent moved it without changing the text.
+                  const caret = event.currentTarget.selectionStart ?? draft.length;
+                  const live = findSlashQuery(draft, caret);
+
+                  insertCanned(hit, live ? { start: live.start, end: caret } : undefined);
+                  return;
+                }
+              }
+
+              if (event.key === "Escape") {
+                if (slash) {
+                  event.preventDefault();
+                  setSlash(null);
+                }
+                return;
+              }
+
               if (event.key === "Enter" && !event.shiftKey) {
                 event.preventDefault();
                 void send();
@@ -1808,41 +2250,38 @@ function ConversationThread({
                 </button>
 
                 {showCannedMenu && (
-                  <div className="absolute bottom-full left-0 mb-2 w-80 sm:w-96 rounded-2xl bg-white dark:bg-[#161922] border border-neutral-200 dark:border-white/15 shadow-2xl p-2.5 z-30 animate-in fade-in zoom-in-95 duration-150 text-slate-800 dark:text-neutral-100">
-                    <div className="px-2 py-1.5 border-b border-neutral-100 dark:border-white/10 flex items-center justify-between mb-1.5">
-                      <span className="text-xs font-semibold flex items-center gap-1.5">
-                        <Sparkles className={`w-3.5 h-3.5 ${currentTheme.uiAccent.icon}`} />
-                        Mẫu câu trả lời nhanh
-                      </span>
-                      <button
-                        type="button"
-                        onClick={() => setShowCannedMenu(false)}
-                        className="opacity-60 hover:opacity-100 p-0.5 rounded cursor-pointer"
-                      >
-                        <X className="w-3.5 h-3.5" />
-                      </button>
-                    </div>
-                    <div className="max-h-56 overflow-y-auto space-y-1 p-0.5">
-                      {cannedResponses.length === 0 && (
-                        <p className="p-2 text-xs opacity-60">Chưa có mẫu câu nào.</p>
-                      )}
-                      {cannedResponses.map((canned, idx) => (
-                        <button
-                          key={idx}
-                          type="button"
-                          onClick={() => handleInsertCanned(canned)}
-                          className="w-full text-left p-2 rounded-lg text-xs hover:bg-black/5 dark:hover:bg-white/10 transition flex items-start gap-2 cursor-pointer group"
-                        >
-                          <span className={`opacity-50 text-[11px] group-hover:${currentTheme.uiAccent.primaryText} mt-0.5 font-mono`}>
-                            #{idx + 1}
-                          </span>
-                          <span className="leading-snug">{canned}</span>
-                        </button>
-                      ))}
-                    </div>
-                  </div>
+                  <CannedPickerPanel
+                    personal={personalTemplates}
+                    effective={effective}
+                    siteName={siteName}
+                    onPick={(template) => insertCanned(template)}
+                    onClose={() => setShowCannedMenu(false)}
+                    canManageSite={isProjectOwner}
+                  />
                 )}
               </div>
+
+              {/* Translate the draft into the visitor's language */}
+              {translationEnabled && draft.trim() && (
+                <button
+                  type="button"
+                  onClick={() => void translateDraft()}
+                  disabled={translatingDraft}
+                  title={`Dịch bản nháp sang ${translationLanguageLabel(visitorLanguage)} (ngôn ngữ của khách) — chỉ hiện cho bạn xem trước`}
+                  className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-medium transition cursor-pointer border select-none shadow-2xs disabled:opacity-50 ${
+                    draftTranslation
+                      ? currentTheme.uiAccent.brandBadge
+                      : currentTheme.classes.actionButton
+                  }`}
+                >
+                  {translatingDraft ? (
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                  ) : (
+                    <Languages className="w-3.5 h-3.5" />
+                  )}
+                  <span className="hidden sm:inline">Dịch</span>
+                </button>
+              )}
 
               {/* Emoji Picker */}
               <div className="relative" ref={emojiPickerRef}>

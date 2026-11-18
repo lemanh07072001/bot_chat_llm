@@ -21,13 +21,54 @@ describe('staff self-service', () => {
   it('persists personal templates and preserves an intentionally empty list', async () => {
     service.updateSelf.mockResolvedValue({ toJSON: () => ({}) });
     await controller.updatePreferences(actor, { soundEnabled: false, cannedResponses: [] });
-    expect(service.updateSelf).toHaveBeenCalledWith(actor.sub, { soundEnabled: false, cannedResponses: [] });
+
+    // An older client sends bodies only; both shapes are written so the newer
+    // editor does not keep showing the replies that client just replaced.
+    expect(service.updateSelf).toHaveBeenCalledWith(actor.sub, {
+      soundEnabled: false,
+      cannedResponses: [],
+      cannedResponseTemplates: [],
+    });
   });
 
   it('does not overwrite templates when toggling only sound', async () => {
     service.updateSelf.mockResolvedValue({ toJSON: () => ({}) });
     await controller.updatePreferences(actor, { soundEnabled: false });
     expect(service.updateSelf).toHaveBeenCalledWith(actor.sub, { soundEnabled: false });
+  });
+
+  it('writes both shapes when the editor saves titled templates', async () => {
+    service.updateSelf.mockResolvedValue({ toJSON: () => ({}) });
+    await controller.updatePreferences(actor, {
+      cannedResponseTemplates: [
+        { title: ' Chào ', shortcut: 'CHAO', text: ' Xin chào ' },
+        { text: ' Cảm ơn ' },
+      ],
+    });
+
+    // The plain list is derived from the templates so a client that only knows
+    // the older shape shows the rows that were just saved.
+    expect(service.updateSelf).toHaveBeenCalledWith(actor.sub, {
+      cannedResponseTemplates: [
+        { title: 'Chào', shortcut: 'chao', text: 'Xin chào' },
+        { text: 'Cảm ơn' },
+      ],
+      cannedResponses: ['Xin chào', 'Cảm ơn'],
+    });
+  });
+
+  it('refuses two templates sharing a shortcut', async () => {
+    service.updateSelf.mockResolvedValue({ toJSON: () => ({}) });
+
+    await expect(
+      controller.updatePreferences(actor, {
+        cannedResponseTemplates: [
+          { shortcut: 'gia', text: 'Giá 100k' },
+          { shortcut: 'gia', text: 'Giá 200k' },
+        ],
+      }),
+    ).rejects.toBeInstanceOf(BadRequestException);
+    expect(service.updateSelf).not.toHaveBeenCalled();
   });
 
   it('rejects wrong current password without writing a new hash', async () => {

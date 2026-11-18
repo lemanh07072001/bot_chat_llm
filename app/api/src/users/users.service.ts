@@ -3,6 +3,7 @@ import { InjectModel } from '@nestjs/mongoose';
 import { Model, isValidObjectId } from 'mongoose';
 import { User, UserDocument, UserRole } from './user.schema.js';
 import { Site } from '../sites/site.schema.js';
+import type { CannedTemplate } from '../sites/site.schema.js';
 
 /** The customer-facing half of a staff account, editable on its own. */
 export interface StaffProfileInput {
@@ -77,7 +78,7 @@ export class UsersService {
     return this.userModel.findOne({ _id: id, deletedAt: null }).exec();
   }
 
-  async updateSelf(id: string, input: { name: string; jobTitle: string; avatarUrl: string } | { soundEnabled?: boolean; cannedResponses?: string[] }) {
+  async updateSelf(id: string, input: { name: string; jobTitle: string; avatarUrl: string } | { soundEnabled?: boolean; cannedResponses?: string[]; cannedResponseTemplates?: CannedTemplate[]; translationLanguage?: string }) {
     return this.userModel.findByIdAndUpdate(id, { $set: input }, { returnDocument: 'after', runValidators: true }).exec();
   }
 

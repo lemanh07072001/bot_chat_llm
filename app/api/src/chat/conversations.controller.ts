@@ -10,6 +10,7 @@ import {
   Param,
   Post,
   Query,
+  ServiceUnavailableException,
 } from '@nestjs/common';
 import { encodeCursor } from './history-cursor.js';
 import { InternalNotesService } from './internal-notes.service.js';
@@ -29,6 +30,8 @@ import {
 import { ChatService, type ConversationAssignment } from './chat.service.js';
 import { SitesService, type SiteAccess } from '../sites/sites.service.js';
 import { UsersService } from '../users/users.service.js';
+import { TranslationService } from '../translation/translation.service.js';
+import { TranslateMessageDto } from '../translation/translation.dto.js';
 
 import { RealtimeBusService } from '../realtime/realtime-bus.service.js';
 import { CurrentUser } from '../auth/current-user.decorator.js';
@@ -110,6 +113,7 @@ export class ConversationsController {
     private readonly users: UsersService,
     private readonly bus: RealtimeBusService,
     private readonly internalNotes: InternalNotesService,
+    private readonly translation: TranslationService,
   ) {}
 
   @Get('unread-counts')
@@ -167,6 +171,9 @@ export class ConversationsController {
         id: String(site._id),
         name: site.name,
         access: String(site.ownerId) === currentUser.sub ? 'owner' : 'manager',
+        // The inbox hides its Dịch buttons for a project that opted out, so the
+        // decision travels with the list the sidebar already loads.
+        translation: site.translation?.enabled !== false,
       })),
     };
   }
@@ -216,6 +223,73 @@ export class ConversationsController {
       hasMore: page.hasMore,
       nextCursor: page.nextCursor,
     };
+  }
+
+  /**
+   * Translates one message and remembers the result on it.
+   *
+   * Persisted rather than returned alone: a thread is read by several agents,
+   * and re-translating the same paragraph for each of them is both slow and
+   * paid for twice.
+   */
+  @HttpCode(200)
+  @Post(':id/messages/:messageId/translate')
+  async translateMessage(
+    @CurrentUser() currentUser: JwtPayload,
+    @Param('id') id: string,
+    @Param('messageId') messageId: string,
+    @Body() dto: TranslateMessageDto,
+  ) {
+    const { site } = await this.loadAccessible(id, currentUser.sub);
+
+    if (site.translation?.enabled === false) {
+      throw new ServiceUnavailableException({
+        message: 'Dự án này đã tắt tính năng dịch.',
+        code: 'TRANSLATE_SITE_DISABLED',
+      });
+    }
+
+    const message = await this.chatService.findMessageById(messageId, id);
+
+    if (!message) {
+      throw new NotFoundException('Không tìm thấy tin nhắn.');
+    }
+
+    // The panel sends the reader's own language; `vi` is the fallback for a
+    // client that predates the preference.
+    const target = dto.target ?? 'vi';
+    const result = await this.translation.translate({
+      text: message.body,
+      target,
+    });
+
+    // Already in the reader's language: storing a copy of the original would
+    // just make the panel render the same words twice.
+    if (result.same) {
+      return { message: message.toJSON(), translation: result };
+    }
+
+    const updated = await this.chatService.saveMessageTranslation(
+      messageId,
+      id,
+      {
+        lang: target,
+        text: result.text,
+        model: this.translation.status().model ?? undefined,
+      },
+    );
+
+    if (!updated) {
+      throw new NotFoundException('Không tìm thấy tin nhắn.');
+    }
+
+    const json = updated.toJSON();
+
+    // The project room, not the conversation room: that one also holds the
+    // visitor, who has no business receiving a translation of their own words.
+    this.bus.emitToSite(String(site._id), 'message:updated', json);
+
+    return { message: json, translation: result };
   }
 
   /**

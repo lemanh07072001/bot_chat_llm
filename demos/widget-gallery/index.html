@@ -1,0 +1,429 @@
+<!doctype html>
+<html lang="vi">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Chat Center — 10 widget demo</title>
+    <style>
+      :root {
+        --ink: #1d1d1f;
+        --muted: #6e6e73;
+        --hairline: rgba(0, 0, 0, 0.08);
+        --accent: #0071e3;
+        --danger: #c0392b;
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+        color: var(--ink);
+        background: #fbfbfd;
+        line-height: 1.55;
+      }
+      header {
+        border-bottom: 1px solid var(--hairline);
+        background: #fff;
+        padding: 20px 24px;
+      }
+      .head-inner { max-width: 1180px; margin: 0 auto; }
+      .logo { font-weight: 650; letter-spacing: -0.01em; font-size: 15px; color: var(--muted); }
+      h1 { font-size: 30px; line-height: 1.2; letter-spacing: -0.02em; margin: 8px 0 8px; }
+      .sub { margin: 0; color: var(--muted); font-size: 15px; }
+      main { max-width: 1180px; margin: 0 auto; padding: 24px 24px 96px; }
+
+      .toolbar {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 12px;
+        padding: 14px 16px;
+        margin: 0 0 16px;
+        border: 1px solid var(--hairline);
+        border-radius: 14px;
+        background: #fff;
+        font-size: 14px;
+      }
+      .toolbar label { color: var(--muted); }
+      .toolbar input {
+        flex: 1 1 240px;
+        min-width: 200px;
+        padding: 8px 10px;
+        font: inherit;
+        font-size: 13.5px;
+        color: var(--ink);
+        background: #fbfbfd;
+        border: 1px solid var(--hairline);
+        border-radius: 9px;
+      }
+      .toolbar input:focus { outline: 2px solid rgba(0, 113, 227, 0.35); outline-offset: 1px; }
+      .toolbar a {
+        margin-left: auto;
+        color: var(--accent);
+        text-decoration: none;
+        white-space: nowrap;
+      }
+      .toolbar a:hover { text-decoration: underline; }
+
+      #status {
+        margin: 0 0 16px;
+        font-size: 13.5px;
+        color: var(--muted);
+        min-height: 20px;
+      }
+      #status.error { color: var(--danger); }
+
+      .notice {
+        border: 1px solid rgba(192, 57, 43, 0.25);
+        background: #fff5f4;
+        color: var(--danger);
+        border-radius: 14px;
+        padding: 14px 16px;
+        font-size: 14px;
+        margin: 0 0 16px;
+      }
+      .notice code {
+        font-size: 12.5px;
+        background: rgba(0, 0, 0, 0.05);
+        padding: 2px 6px;
+        border-radius: 6px;
+      }
+      .empty {
+        border: 1px solid var(--hairline);
+        border-radius: 14px;
+        background: #fff;
+        padding: 22px;
+        font-size: 14px;
+        color: var(--muted);
+      }
+
+      #grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+        gap: 16px;
+      }
+      .card {
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+        padding: 16px 18px 18px;
+        border: 1px solid var(--hairline);
+        border-radius: 14px;
+        background: #fff;
+        transition: box-shadow 0.16s ease, border-color 0.16s ease;
+      }
+      .card.active {
+        border-color: rgba(0, 113, 227, 0.5);
+        box-shadow: 0 0 0 3px rgba(0, 113, 227, 0.12);
+      }
+      .card h3 {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        margin: 0;
+        font-size: 16px;
+        letter-spacing: -0.01em;
+      }
+      .dot {
+        width: 10px;
+        height: 10px;
+        flex: 0 0 auto;
+        border-radius: 50%;
+      }
+      .card .title { font-size: 13px; color: var(--muted); margin: 0; }
+      .card .greeting { font-size: 13.5px; color: var(--muted); margin: 0; }
+      .card code {
+        display: block;
+        font-size: 11.5px;
+        color: #3a3a3c;
+        background: #fbfbfd;
+        border: 1px solid var(--hairline);
+        border-radius: 8px;
+        padding: 6px 8px;
+        overflow-x: auto;
+        white-space: nowrap;
+      }
+      .actions { display: flex; gap: 8px; margin-top: 2px; }
+      .actions button {
+        font: inherit;
+        font-size: 13px;
+        padding: 7px 14px;
+        border-radius: 9px;
+        border: 1px solid transparent;
+        cursor: pointer;
+        transition: opacity 0.15s ease;
+      }
+      .actions button:hover { opacity: 0.88; }
+      .actions button:disabled { cursor: default; opacity: 0.4; }
+      .open-button { color: #fff; font-weight: 550; }
+      .close-button {
+        background: #fff;
+        color: var(--ink);
+        border-color: var(--hairline);
+      }
+      .snippet { position: relative; margin-top: 6px; }
+      .snippet pre {
+        margin: 0;
+        padding: 10px 12px;
+        background: #1d1d1f;
+        color: #f5f5f7;
+        border-radius: 10px;
+        font-size: 11.5px;
+        overflow-x: auto;
+      }
+      .copy-button {
+        position: absolute;
+        top: 6px;
+        right: 6px;
+        font: inherit;
+        font-size: 11px;
+        padding: 4px 9px;
+        border-radius: 7px;
+        border: 1px solid rgba(255, 255, 255, 0.22);
+        background: rgba(255, 255, 255, 0.12);
+        color: #f5f5f7;
+        cursor: pointer;
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <div class="head-inner">
+        <span class="logo">Chat Center</span>
+        <h1>Chat Center — 10 widget demo</h1>
+        <p class="sub">
+          Mỗi thẻ là một site riêng (public key riêng). Bấm “Mở chat” để nạp widget của site đó.
+        </p>
+      </div>
+    </header>
+
+    <main>
+      <div class="toolbar">
+        <label for="api-url">API URL</label>
+        <input id="api-url" type="text" spellcheck="false" value="http://localhost:3002/api" />
+        <a href="http://127.0.0.1:3000/inbox" target="_blank" rel="noopener">Mở hộp thư admin</a>
+      </div>
+
+      <p id="status"></p>
+      <div id="notice"></div>
+      <div id="grid"></div>
+    </main>
+
+    <script type="module">
+      const apiInput = document.getElementById('api-url');
+      const grid = document.getElementById('grid');
+      const statusLine = document.getElementById('status');
+      const notice = document.getElementById('notice');
+
+      let sites = [];
+      let modPromise = null;
+      let instance = null;
+      let openIndex = -1;
+      // Incremented on every open/close so a slow module download cannot mount
+      // a widget whose request has already been superseded.
+      let openAttempt = 0;
+      // Kept so a new API URL can load a module from that origin instead.
+      let modUrl = null;
+
+      const escapeHtml = (value) =>
+        String(value ?? '')
+          .replace(/&/g, '&amp;')
+          .replace(/</g, '&lt;')
+          .replace(/>/g, '&gt;')
+          .replace(/"/g, '&quot;')
+          .replace(/'/g, '&#39;');
+
+      const apiUrl = () => apiInput.value.trim().replace(/\/+$/, '');
+
+      /** The bundle sits on the api origin, next to (not under) the `/api` prefix. */
+      const widgetBase = () => apiUrl().replace(/\/api\/?$/, '');
+
+      function setStatus(text, isError = false) {
+        statusLine.textContent = text;
+        statusLine.classList.toggle('error', isError);
+      }
+
+      function snippetFor(site) {
+        // Built from pieces: a literal closing script tag here would end this
+        // very module block when the browser parses the page.
+        const open = '<' + 'script';
+        const close = '<' + '/script>';
+        const src = `${widgetBase()}/v1/widget.js`;
+
+        return `${open} src="${src}" data-chat-center-key="${site.publicKey}" async>${close}`;
+      }
+
+      function render() {
+        if (sites.length === 0) {
+          grid.innerHTML =
+            '<div class="empty">Chưa có site nào trong <code>sites.json</code>. Chạy <code>node demos/seed-widget-sites.mjs</code> rồi tải lại trang.</div>';
+          return;
+        }
+
+        grid.innerHTML = sites
+          .map((site, index) => {
+            const snippet = escapeHtml(snippetFor(site));
+            return `
+              <article class="card" data-index="${index}">
+                <h3><span class="dot" style="background:${escapeHtml(site.themeColor)}"></span>${escapeHtml(site.name)}</h3>
+                <p class="title">${escapeHtml(site.title)}</p>
+                <p class="greeting">${escapeHtml(site.greeting)}</p>
+                <code>${escapeHtml(site.publicKey)}</code>
+                <div class="actions">
+                  <button class="open-button" type="button" data-open="${index}" style="background:${escapeHtml(site.themeColor)}">Mở chat</button>
+                  <button class="close-button" type="button" data-close="${index}" disabled>Đóng</button>
+                </div>
+                <div class="snippet">
+                  <pre><code>${snippet}</code></pre>
+                  <button class="copy-button" type="button" data-copy="${index}">Copy</button>
+                </div>
+              </article>
+            `;
+          })
+          .join('');
+
+        syncButtons();
+      }
+
+      /** Toggles button state and the active card without rebuilding the grid. */
+      function syncButtons() {
+        grid.querySelectorAll('.card').forEach((card) => {
+          const index = Number(card.dataset.index);
+          const isOpen = index === openIndex;
+          const openButton = card.querySelector('.open-button');
+          const closeButton = card.querySelector('.close-button');
+
+          card.classList.toggle('active', isOpen);
+          openButton.disabled = isOpen;
+          openButton.setAttribute('aria-pressed', String(isOpen));
+          closeButton.disabled = !isOpen;
+        });
+      }
+
+      async function open(index) {
+        const site = sites[index];
+
+        if (!site) return;
+
+        // Clicking a second card while the module is still downloading must not
+        // leave two widgets on the page: only the newest attempt may mount.
+        const attempt = ++openAttempt;
+
+        try {
+          if (instance) {
+            instance.destroy();
+            instance = null;
+          }
+
+          const url = `${widgetBase()}/v1/widget.mjs`;
+
+          // A changed API URL means a different bundle, so reload the module.
+          if (modUrl !== url) {
+            modPromise = null;
+            modUrl = url;
+          }
+
+          modPromise ??= import(url);
+
+          const mod = await modPromise;
+
+          if (attempt !== openAttempt) return;
+
+          instance = mod.init({ publicKey: site.publicKey, apiUrl: apiUrl() });
+          openIndex = index;
+          syncButtons();
+          setStatus(`Đang mở: ${site.name}`);
+        } catch (error) {
+          if (attempt !== openAttempt) return;
+
+          instance = null;
+          openIndex = -1;
+          syncButtons();
+          setStatus(`Không nạp được widget: ${error?.message ?? error}`, true);
+        }
+      }
+
+      function close() {
+        openAttempt += 1;
+        instance?.destroy();
+        instance = null;
+        openIndex = -1;
+        syncButtons();
+        setStatus('');
+      }
+
+      grid.addEventListener('click', async (event) => {
+        const openButton = event.target.closest('[data-open]');
+        const closeButton = event.target.closest('[data-close]');
+        const copyButton = event.target.closest('[data-copy]');
+
+        if (openButton) {
+          await open(Number(openButton.dataset.open));
+          return;
+        }
+
+        if (closeButton) {
+          close();
+          return;
+        }
+
+        if (copyButton) {
+          const site = sites[Number(copyButton.dataset.copy)];
+
+          if (!site) return;
+
+          try {
+            await navigator.clipboard.writeText(snippetFor(site));
+            copyButton.textContent = 'Đã copy';
+
+            setTimeout(() => {
+              copyButton.textContent = 'Copy';
+            }, 1500);
+          } catch {
+            setStatus('Trình duyệt không cho copy — bôi đen đoạn mã rồi copy tay.', true);
+          }
+        }
+      });
+
+      // A different api lives on a different origin, so the loaded bundle is stale.
+      apiInput.addEventListener('change', () => {
+        close();
+        modPromise = null;
+        modUrl = null;
+        render();
+      });
+
+      try {
+        // Resolve against the directory, never against the raw href: a query
+        // string (`/gallery?x=1`) would otherwise turn into `/sites.json`.
+        // Opened straight from disk the path ends in index.html instead.
+        const dir = location.pathname.endsWith('/')
+          ? location.pathname
+          : /\.[a-z0-9]+$/i.test(location.pathname)
+            ? location.pathname.replace(/[^/]*$/, '')
+            : `${location.pathname}/`;
+
+        const sitesUrl = location.protocol === 'file:'
+          ? new URL('sites.json', location.href)
+          : new URL(`${dir}sites.json`, location.origin);
+
+        const response = await fetch(sitesUrl, { cache: 'no-store' });
+
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+
+        const data = await response.json();
+
+        sites = Array.isArray(data) ? data.filter((site) => site && site.publicKey) : [];
+      } catch (error) {
+        sites = [];
+        notice.innerHTML = `
+          <div class="notice">
+            Không đọc được <code>sites.json</code> (${escapeHtml(error.message)}). Hãy chạy
+            <code>node demos/seed-widget-sites.mjs</code> từ thư mục gốc dự án để tạo 10 site.
+          </div>
+        `;
+      }
+
+      render();
+    </script>
+  </body>
+</html>

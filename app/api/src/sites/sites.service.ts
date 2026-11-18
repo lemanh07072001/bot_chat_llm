@@ -6,6 +6,7 @@ import {
   OfficeHours,
   Site,
   SiteDocument,
+  SiteTranslation,
   WidgetSettings,
 } from './site.schema.js';
 import { SiteMember, SiteMemberDocument } from './site-member.schema.js';
@@ -16,6 +17,7 @@ export interface CreateSiteInput {
   allowedOrigins?: string[];
   settings?: Partial<WidgetSettings>;
   officeHours?: Partial<OfficeHours>;
+  translation?: Partial<SiteTranslation>;
 }
 
 export interface UpdateSiteInput {
@@ -23,6 +25,7 @@ export interface UpdateSiteInput {
   allowedOrigins?: string[];
   settings?: Partial<WidgetSettings>;
   officeHours?: Partial<OfficeHours>;
+  translation?: Partial<SiteTranslation>;
   active?: boolean;
 }
 
@@ -92,6 +95,7 @@ export class SitesService {
       allowedOrigins: input.allowedOrigins ?? [],
       settings: input.settings ?? {},
       officeHours: input.officeHours ?? {},
+      translation: input.translation ?? {},
     });
   }
 
@@ -194,8 +198,35 @@ export class SitesService {
     if (input.officeHours !== undefined) {
       Object.assign(site.officeHours, definedOnly(input.officeHours));
     }
+    if (input.translation !== undefined) {
+      Object.assign(site.translation, definedOnly(input.translation));
+    }
 
     return site.save();
+  }
+
+  /**
+   * Compare-and-swap write for the project's canned replies.
+   *
+   * Kept here, next to every other Site write, so `canned-responses` never has
+   * to reach for the model itself. The caller builds a filter that includes
+   * the expected version; a null result means somebody else saved first.
+   */
+  async findOneAndUpdateCanned(
+    id: string,
+    filter: Record<string, unknown>,
+    update: Record<string, unknown>,
+  ): Promise<SiteDocument | null> {
+    if (!Types.ObjectId.isValid(id)) {
+      return null;
+    }
+
+    return this.siteModel
+      .findOneAndUpdate(filter, update, {
+        returnDocument: 'after',
+        runValidators: true,
+      })
+      .exec();
   }
 
   async softDelete(id: string): Promise<void> {

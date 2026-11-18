@@ -7,6 +7,13 @@ import type {
   ProjectRef,
 } from "@/lib/chat";
 import type { MemberRole, Site } from "@/lib/sites";
+import type {
+  CannedMode,
+  CannedSet,
+  CannedTemplate,
+  EffectiveCanned,
+  SiteCannedSet,
+} from "@/lib/canned";
 
 /**
  * Server-only: reads the httpOnly session cookie via next/headers. Importing
@@ -135,5 +142,101 @@ export async function removeSiteMember(
   return apiFetch(
     `/sites/${encodeURIComponent(siteId)}/members/${encodeURIComponent(userId)}`,
     { method: "DELETE", headers: await authHeaders() },
+  );
+}
+
+// --- Canned replies ---------------------------------------------------------
+
+export async function getGlobalCanned(): Promise<ApiResult<CannedSet>> {
+  return apiFetch("/canned-responses/global", {
+    headers: await authHeaders(),
+    cache: "no-store",
+  });
+}
+
+export async function saveGlobalCanned(input: {
+  version: number;
+  templates: CannedTemplate[];
+}): Promise<ApiResult<CannedSet>> {
+  return apiFetch("/canned-responses/global", {
+    method: "PUT",
+    headers: await authHeaders(),
+    body: JSON.stringify(input),
+  });
+}
+
+export async function getSiteCanned(siteId: string): Promise<ApiResult<SiteCannedSet>> {
+  return apiFetch(`/sites/${encodeURIComponent(siteId)}/canned-responses`, {
+    headers: await authHeaders(),
+    cache: "no-store",
+  });
+}
+
+export async function saveSiteCanned(
+  siteId: string,
+  input: { version: number; templates: CannedTemplate[]; mode?: CannedMode },
+): Promise<ApiResult<SiteCannedSet>> {
+  return apiFetch(`/sites/${encodeURIComponent(siteId)}/canned-responses`, {
+    method: "PUT",
+    headers: await authHeaders(),
+    body: JSON.stringify(input),
+  });
+}
+
+export async function getEffectiveCanned(siteId: string): Promise<ApiResult<EffectiveCanned>> {
+  return apiFetch(`/canned-responses/effective?siteId=${encodeURIComponent(siteId)}`, {
+    headers: await authHeaders(),
+    cache: "no-store",
+  });
+}
+
+// --- Translation ------------------------------------------------------------
+
+export type TranslationStatus = {
+  enabled: boolean;
+  model: string | null;
+  languages: Array<{ code: string; label: string }>;
+};
+
+export type TranslationResult = {
+  text: string;
+  source: string;
+  target: string;
+  same: boolean;
+  cached: boolean;
+};
+
+export async function getTranslationStatus(): Promise<ApiResult<TranslationStatus>> {
+  return apiFetch("/translation/status", {
+    headers: await authHeaders(),
+    cache: "no-store",
+  });
+}
+
+/** Translating a draft: nothing is stored on the api side. */
+export async function translatePreview(input: {
+  text: string;
+  target: string;
+  source?: string;
+}): Promise<ApiResult<TranslationResult>> {
+  return apiFetch("/translation/preview", {
+    method: "POST",
+    headers: await authHeaders(),
+    body: JSON.stringify(input),
+  });
+}
+
+export async function translateMessage(
+  conversationId: string,
+  messageId: string,
+  target: string,
+): Promise<ApiResult<{ message: ChatMessage; translation: TranslationResult }>> {
+  return apiFetch(
+    `/conversations/${encodeURIComponent(conversationId)}/messages/${encodeURIComponent(messageId)}/translate`,
+    {
+      method: "POST",
+      headers: await authHeaders(),
+      body: JSON.stringify({ target }),
+    },
   );
 }

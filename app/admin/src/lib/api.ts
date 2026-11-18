@@ -26,6 +26,11 @@ export async function apiFetch<T>(
     };
   }
 
+  // Reads must not hang a server-rendered page when the API is wedged; writes
+  // are left alone so slow-but-legitimate work (mail, uploads) is not cut off.
+  const method = (init?.method ?? "GET").toUpperCase();
+  const isRead = method === "GET" || method === "HEAD";
+
   let res: Response;
   try {
     res = await fetch(`${API_URL}${path}`, {
@@ -35,6 +40,7 @@ export async function apiFetch<T>(
         ...init?.headers,
       },
       cache: init?.cache ?? "no-store",
+      signal: init?.signal ?? (isRead ? AbortSignal.timeout(8000) : undefined),
     });
   } catch {
     return {
