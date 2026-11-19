@@ -39,6 +39,12 @@ const GROUP_GLYPHS: Record<string, string> = {
 /** The grid is eight wide, so ↑/↓ can step by whole rows. */
 const COLUMNS = 8;
 
+/** `h-9` button plus `gap-0.5`: the row pitch a placeholder has to match. */
+const BUTTON_HEIGHT = 36;
+const GAP = 2;
+/** `pb-1.5` under the last row; omitted, every group drifts 6px shorter. */
+const BOTTOM_PADDING = 6;
+
 const VIEWPORT_MARGIN = 8;
 
 /** Below this the picker stops being usable; better to overflow than to vanish. */
@@ -46,6 +52,74 @@ const MIN_PANEL_HEIGHT = 192;
 
 let emojiCache: EmojiData | null = null;
 let emojiRequest: Promise<EmojiData> | null = null;
+
+/** The family declared in `globals.css`; see the comment there. */
+const EMOJI_FONT = "ChatEmojiFill";
+
+let fontRequest: Promise<void> | null = null;
+
+/**
+ * How long the panel waits for the emoji font before painting anyway.
+ *
+ * The wait is what stops the newer glyphs flashing as empty boxes, but a
+ * stalled download must not leave the whole picker stuck on "Đang tải emoji…":
+ * after this the grid renders and the font swaps in when it lands.
+ */
+const FONT_WAIT_MS = 1500;
+
+function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T | undefined> {
+  return new Promise<T | undefined>((resolve) => {
+    const timer = setTimeout(() => resolve(undefined), ms);
+    void promise.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      () => {
+        // A rejected font probe is handled by its own `catch`; resolving here
+        // keeps this helper from turning "font missing" into "picker broken".
+        clearTimeout(timer);
+        resolve(undefined);
+      },
+    );
+  });
+}
+
+/**
+ * Resolves once the emoji fill font is usable.
+ *
+ * The grid paints 1,900 glyphs in one go; if the webfont is still in flight the
+ * 462 newer ones flash as empty boxes before swapping in. Waiting here turns
+ * that into a slightly longer "Đang tải emoji…" and then a clean first paint.
+ *
+ * Any covered character fetches the whole file, so one probe is enough. The
+ * probe is also what makes it a *file* request: `fonts.load` skips faces whose
+ * unicode-range does not match the sample text.
+ */
+function loadEmojiFont(): Promise<void> {
+  if (typeof document === "undefined" || !("fonts" in document)) return Promise.resolve();
+
+  if (!fontRequest) {
+    fontRequest = document.fonts
+      .load(`1rem "${EMOJI_FONT}"`, "\u{1F1FB}\u{1F1F3}")
+      .then((faces) => {
+        // `load()` resolves with an empty array when no declared face matches
+        // the sample — a mis-typed family name or a unicode-range that no
+        // longer covers the probe. Treating that as success would paint the
+        // grid with the broken platform glyphs, which is the whole bug.
+        if (!faces.some((face) => face.status === "loaded")) {
+          throw new Error(`${EMOJI_FONT} unavailable`);
+        }
+      })
+      .catch(() => {
+        // A missing font is cosmetic: the platform font still draws most of the
+        // grid, so a failed download must not block the picker.
+        fontRequest = null;
+      });
+  }
+
+  return fontRequest;
+}
 
 /**
  * The dataset is ~180 KB, so it is fetched the first time a picker opens and
@@ -164,11 +238,30 @@ export function EmojiPickerPanel({
   /** -1 shows every group with its heading; a group order shows just that one. */
   const [tab, setTab] = useState(-1);
   const [recent, setRecent] = useState<string[]>([]);
+  /**
+   * Groups whose buttons have been mounted.
+   *
+   * Building 1,900 buttons before the panel paints costs ~500ms of blocking
+   * work, which is the stutter on the first open. Instead only the group the
+   * user is looking at exists, its neighbours join as the grid scrolls near
+   * them, and the rest wait as correctly-sized placeholders.
+   */
+  const [mounted, setMounted] = useState<ReadonlySet<number>>(
+    () => new Set(emojiCache ? emojiCache.groups.slice(0, 1).map((group) => group.order) : []),
+  );
 
   const listRef = useRef<HTMLDivElement | null>(null);
   const rootRef = useRef<HTMLDivElement | null>(null);
   const sectionRefs = useRef<Record<number, HTMLDivElement | null>>({});
   const inputRef = useRef<HTMLInputElement | null>(null);
+  /**
+   * Identifies the newest arrow-key request.
+   *
+   * Revealing a group means waiting for React to commit it, which can take a
+   * few frames. If the user moves on in the meantime — another arrow, a click,
+   * Tab — the late callback must not drag focus back.
+   */
+  const navToken = useRef(0);
 
   useEffect(() => {
     // Captured before the search box grabs focus, so this is the real opener.
@@ -180,9 +273,24 @@ export function EmojiPickerPanel({
     inputRef.current?.focus();
 
     let alive = true;
-    void loadEmojis()
-      .then((loaded) => {
-        if (alive) setData(loaded);
+    // Dataset and font are independent downloads; a picker that shows every
+    // glyph correctly matters more than one that shows them a moment sooner.
+    void Promise.all([loadEmojis(), withTimeout(loadEmojiFont(), FONT_WAIT_MS)])
+      .then(([loaded]) => {
+        if (!alive) return;
+        setData(loaded);
+        // Seed the first group so the panel never paints an empty grid while
+        // the intersection observer warms up. Merge rather than replace: the
+        // observer may already have mounted what the user is looking at, and
+        // replacing the set would blank that region — its geometry is unchanged,
+        // so the observer would have no reason to fire again.
+        const first = loaded.groups[0];
+        if (first) {
+          setMounted((previous) => {
+            if (previous.has(first.order)) return previous;
+            return new Set(previous).add(first.order);
+          });
+        }
       })
       .catch(() => {
         if (alive) setFailed(true);
@@ -233,6 +341,49 @@ export function EmojiPickerPanel({
 
   const groups = data?.groups ?? [];
 
+  /**
+   * Brings groups to life as the grid nears them.
+   *
+   * `rootMargin` starts the work slightly before a group is on screen, so
+   * scrolling never reveals an empty block. Groups already mounted stay
+   * mounted, so scrolling back up costs nothing.
+   */
+  useEffect(() => {
+    const container = listRef.current;
+    if (!container || !data) return;
+
+    const nodes = container.querySelectorAll<HTMLElement>("[data-group]");
+    if (!nodes.length) return;
+
+    const observer = new IntersectionObserver(
+      (entries) => {
+        const arrived = entries
+          .filter((entry) => entry.isIntersecting)
+          .map((entry) => Number((entry.target as HTMLElement).dataset.group));
+
+        if (!arrived.length) return;
+
+        setMounted((previous) => {
+          const next = new Set(previous);
+          let changed = false;
+
+          for (const order of arrived) {
+            if (next.has(order)) continue;
+            next.add(order);
+            changed = true;
+          }
+
+          return changed ? next : previous;
+        });
+      },
+      { root: container, rootMargin: "320px 0px" },
+    );
+
+    for (const node of nodes) observer.observe(node);
+
+    return () => observer.disconnect();
+  }, [data, tab, query]);
+
   const pick = (emoji: string) => {
     setRecent(rememberEmoji(emoji));
     onPick(emoji);
@@ -241,6 +392,18 @@ export function EmojiPickerPanel({
   const goToGroup = (order: number) => {
     setQuery("");
     setTab(order);
+
+    // Visiting a group tab mounts only that group. Returning to "Tất cả" from a
+    // group starts a fresh window again, otherwise every group visited so far
+    // stays mounted and the next open pays the full render cost.
+    //
+    // Only when the tab actually changes. Clicking "Tất cả" while already there
+    // would otherwise swap the live groups for placeholders that nothing
+    // re-mounts: their geometry is identical, so the observer — whose
+    // dependencies have not changed — never fires again.
+    if (order === -1 && tab !== -1) {
+      setMounted(new Set(groups[0] ? [groups[0].order] : []));
+    }
 
     requestAnimationFrame(() => {
       const container = listRef.current;
@@ -251,6 +414,20 @@ export function EmojiPickerPanel({
       }
       container.scrollTo({ top: section.offsetTop, behavior: "smooth" });
     });
+  };
+
+  /** Moves focus to a cell of `order`; false while that group is still a placeholder. */
+  const focusCell = (order: number, at: number | "first" | "last") => {
+    const cells = listRef.current?.querySelectorAll<HTMLButtonElement>(
+      `[data-group="${order}"] [data-emoji]`,
+    );
+    if (!cells?.length) return false;
+
+    const target = at === "first" ? cells[0] : at === "last" ? cells[cells.length - 1] : cells[at];
+    if (!target) return false;
+
+    target.focus();
+    return true;
   };
 
   /** Arrow keys walk the grid; a picker nobody can reach with keys is half a picker. */
@@ -265,15 +442,78 @@ export function EmojiPickerPanel({
     const delta = deltas[event.key];
     if (!delta) return;
 
-    const buttons = [
-      ...(listRef.current?.querySelectorAll<HTMLButtonElement>("[data-emoji]") ?? []),
-    ];
-    const current = buttons.indexOf(document.activeElement as HTMLButtonElement);
-    if (current === -1) return;
+    const active = document.activeElement as HTMLElement | null;
+    if (!active) return;
+
+    const holder = active.closest<HTMLElement>("[data-group]");
+
+    // Search results and the "Gần đây" strip carry no group identity. Both are
+    // short and always fully rendered, so plain neighbour stepping is right.
+    if (!holder) {
+      const flat = [
+        ...(listRef.current?.querySelectorAll<HTMLButtonElement>("[data-emoji]") ?? []),
+      ];
+      const at = flat.indexOf(active as HTMLButtonElement);
+      if (at === -1) return;
+
+      event.preventDefault();
+      const next = at + delta;
+      if (next >= 0 && next < flat.length) flat[next].focus();
+      return;
+    }
+
+    // Step inside the group this cell belongs to, measured on that group's own
+    // cells. Counting over every mounted button instead would skip whole groups:
+    // once the user has scrolled far enough that group 3 is alive but group 1
+    // is still a placeholder, "+1 from the last cell of group 0" lands in 3.
+    const order = Number(holder.dataset.group);
+    const index = groups.findIndex((group) => group.order === order);
+    if (index === -1) return;
+
+    const cells = [...holder.querySelectorAll<HTMLButtonElement>("[data-emoji]")];
+    const at = cells.indexOf(active as HTMLButtonElement);
+    if (at === -1) return;
 
     event.preventDefault();
-    const next = Math.min(buttons.length - 1, Math.max(0, current + delta));
-    buttons[next]?.focus();
+    const token = ++navToken.current;
+
+    const target = at + delta;
+    if (target >= 0 && target < cells.length) {
+      cells[target].focus();
+      return;
+    }
+
+    // Crossed a group edge. A single group on its own tab has nothing beyond it.
+    if (tab !== -1) return;
+
+    const neighbour = groups[index + (delta > 0 ? 1 : -1)];
+    if (!neighbour) return;
+
+    const edge = delta > 0 ? "first" : "last";
+    /** Where the caret was when the request was made; a late callback must not steal focus. */
+    const origin = active;
+
+    const reveal = (attempt = 0) => {
+      // Another arrow key, a Tab or a click superseded this request.
+      if (navToken.current !== token) return;
+      if (document.activeElement !== origin) return;
+      if (focusCell(neighbour.order, edge)) return;
+
+      // React has not committed the group yet; a frame or two is normal.
+      if (attempt < 10) requestAnimationFrame(() => reveal(attempt + 1));
+    };
+
+    // Walking past the mounted range has to bring the next group in first,
+    // otherwise the caret hits an invisible wall and the rest of the grid is
+    // mouse-only. Focus by group identity rather than by index: a newly mounted
+    // group is inserted where it belongs, which shifts every index after it.
+    if (focusCell(neighbour.order, edge)) return;
+
+    setMounted((previous) => {
+      if (previous.has(neighbour.order)) return previous;
+      return new Set(previous).add(neighbour.order);
+    });
+    requestAnimationFrame(reveal);
   };
 
   const emojiButton = (glyph: string, label: string) => (
@@ -290,23 +530,39 @@ export function EmojiPickerPanel({
     </button>
   );
 
-  const section = (order: number, label: string, entries: EmojiEntry[]) => (
-    <div
-      key={order}
-      ref={(node) => {
-        sectionRefs.current[order] = node;
-      }}
-    >
+  const section = (order: number, label: string, entries: EmojiEntry[]) => {
+    // The selected tab always renders: there is nothing to lazy-load inside it.
+    const shown = tab === order || mounted.has(order);
+    const rows = Math.ceil(entries.length / COLUMNS);
+
+    return (
       <div
-        className={`sticky top-0 z-10 px-2 py-1 text-[10px] font-semibold uppercase tracking-wide backdrop-blur-sm ${stickyClass(theme)}`}
+        key={order}
+        data-group={order}
+        ref={(node) => {
+          sectionRefs.current[order] = node;
+        }}
       >
-        {label}
+        <div
+          className={`sticky top-0 z-10 px-2 py-1 text-[10px] font-semibold uppercase tracking-wide backdrop-blur-sm ${stickyClass(theme)}`}
+        >
+          {label}
+        </div>
+        {/* A placeholder keeps the scroll height exact, so the thumb does not
+            jump as groups come alive. */}
+        <div
+          className="grid grid-cols-8 gap-0.5 px-1.5 pb-1.5"
+          style={
+            shown
+              ? undefined
+              : { height: rows * BUTTON_HEIGHT + Math.max(0, rows - 1) * GAP + BOTTOM_PADDING }
+          }
+        >
+          {shown ? entries.map((entry) => emojiButton(entry.e, entry.l)) : null}
+        </div>
       </div>
-      <div className="grid grid-cols-8 gap-0.5 px-1.5 pb-1.5">
-        {entries.map((entry) => emojiButton(entry.e, entry.l))}
-      </div>
-    </div>
-  );
+    );
+  };
 
   let body: ReactNode;
 
@@ -326,8 +582,8 @@ export function EmojiPickerPanel({
           type="button"
           onClick={() => {
             setFailed(false);
-            void loadEmojis()
-              .then(setData)
+            void Promise.all([loadEmojis(), withTimeout(loadEmojiFont(), FONT_WAIT_MS)])
+              .then(([loaded]) => setData(loaded))
               .catch(() => setFailed(true));
           }}
           className={`mt-2 rounded-lg border px-2.5 py-1 text-[11px] font-medium cursor-pointer ${fieldClass(theme)} ${hoverClass(theme)}`}
