@@ -105,11 +105,6 @@ export class CreateSiteDto {
   @ValidateNested()
   @Type(() => OfficeHoursDto)
   officeHours?: OfficeHoursDto;
-
-  @IsOptional()
-  @ValidateNested()
-  @Type(() => TranslationSettingsDto)
-  translation?: TranslationSettingsDto;
 }
 
 export class UpdateSiteDto {

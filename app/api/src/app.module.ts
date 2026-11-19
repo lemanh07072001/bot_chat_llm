@@ -32,8 +32,6 @@ import { RealtimeSharedModule } from './realtime/realtime-shared.module.js';
     WidgetModule,
     TelegramModule,
     CannedResponsesModule,
-    TranslationModule,
-
   ],
   controllers: [AppController],
   providers: [AppService],
