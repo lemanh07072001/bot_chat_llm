@@ -1,4 +1,4 @@
-import { Controller, Get, Header, Req, Res } from '@nestjs/common';
+import { Controller, Get, Req, Res } from '@nestjs/common';
 import type { Request, Response } from 'express';
 import { Public } from '../auth/public.decorator.js';
 import { WidgetAssetService, type WidgetAsset, type WidgetAssetName } from './widget-asset.service.js';
@@ -14,6 +14,10 @@ import { WidgetAssetService, type WidgetAsset, type WidgetAssetName } from './wi
  * as long as it honours the same ETag.
  */
 const CACHE_CONTROL = 'public, max-age=300, stale-while-revalidate=86400';
+
+const JS_TYPE = 'text/javascript; charset=utf-8';
+const JSON_TYPE = 'application/json; charset=utf-8';
+const FONT_TYPE = 'font/woff2';
 
 // These routes sit outside the global `api` prefix — see main.ts — so the embed
 // snippet reads as a plain script url.
@@ -37,15 +41,48 @@ export class WidgetAssetController {
   /** For host pages that would rather `import` the widget than script-tag it. */
   @Public()
   @Get('v1/widget.mjs')
-  @Header('Content-Type', 'text/javascript; charset=utf-8')
   async module(@Req() request: Request, @Res() response: Response): Promise<void> {
     await this.send('widget.mjs', request, response);
   }
 
-  private async send(name: WidgetAssetName, request: Request, response: Response): Promise<void> {
+  /**
+   * The picker's dataset and fill font. Both the canonical `/v1/assets/` and
+   * the unversioned `/assets/` alias resolve to the same files: a snippet still
+   * pointing at `/widget.js` derives `./assets/` from that url.
+   */
+  @Public()
+  @Get('v1/assets/emoji-data.json')
+  async emojiData(@Req() request: Request, @Res() response: Response): Promise<void> {
+    await this.send('emoji-data.json', request, response, JSON_TYPE);
+  }
+
+  @Public()
+  @Get('assets/emoji-data.json')
+  async emojiDataLegacy(@Req() request: Request, @Res() response: Response): Promise<void> {
+    await this.send('emoji-data.json', request, response, JSON_TYPE);
+  }
+
+  @Public()
+  @Get('v1/assets/chat-emoji-fill.woff2')
+  async emojiFont(@Req() request: Request, @Res() response: Response): Promise<void> {
+    await this.send('chat-emoji-fill.woff2', request, response, FONT_TYPE);
+  }
+
+  @Public()
+  @Get('assets/chat-emoji-fill.woff2')
+  async emojiFontLegacy(@Req() request: Request, @Res() response: Response): Promise<void> {
+    await this.send('chat-emoji-fill.woff2', request, response, FONT_TYPE);
+  }
+
+  private async send(
+    name: WidgetAssetName,
+    request: Request,
+    response: Response,
+    contentType: string = JS_TYPE,
+  ): Promise<void> {
     const asset = await this.assets.load(name);
 
-    this.setHeaders(response, asset);
+    this.setHeaders(response, asset, contentType);
 
     // A classic <script> tag sends no conditional header, but a CDN or a page
     // reloaded with a warm cache does.
@@ -57,8 +94,8 @@ export class WidgetAssetController {
     response.status(200).send(asset.body);
   }
 
-  private setHeaders(response: Response, asset: WidgetAsset): void {
-    response.setHeader('Content-Type', 'text/javascript; charset=utf-8');
+  private setHeaders(response: Response, asset: WidgetAsset, contentType: string): void {
+    response.setHeader('Content-Type', contentType);
     response.setHeader('Cache-Control', CACHE_CONTROL);
     response.setHeader('ETag', `"${asset.hash}"`);
     response.setHeader('Last-Modified', asset.builtAt.toUTCString());

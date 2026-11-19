@@ -7,6 +7,11 @@ export interface ChatWidgetOptions {
   target?: HTMLElement;
   /** Overrides the title configured on the site. */
   title?: string;
+  /**
+   * Directory holding `emoji-data.json` and `chat-emoji-fill.woff2`, trailing
+   * slash and all. Derived from the script src when omitted.
+   */
+  assetBaseUrl?: string;
 }
 
 export interface ChatWidgetInstance {

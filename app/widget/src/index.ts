@@ -1,4 +1,5 @@
 import { ChatWidget } from './widget.js';
+import { resolveAssetBase } from './emoji-assets.js';
 import type { ChatWidgetInstance, ChatWidgetOptions } from './types.js';
 
 export type { ChatWidgetInstance, ChatWidgetOptions, ChatMessage, WidgetSettings } from './types.js';
@@ -40,10 +41,14 @@ function autoBoot(): void {
     return;
   }
 
+  const apiUrl = deriveApiUrl(script);
   const options: ChatWidgetOptions = {
     publicKey,
-    apiUrl: deriveApiUrl(script),
+    apiUrl,
     title: script?.dataset.title,
+    // The emoji files sit next to the script; an operator behind a CDN that
+    // moves them can pin the directory with data-asset-base-url.
+    assetBaseUrl: resolveAssetBase(script?.dataset.assetBaseUrl, script?.src, apiUrl),
   };
 
   const start = () => {

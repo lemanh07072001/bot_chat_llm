@@ -73,6 +73,26 @@ createServer(async (req, res) => {
   // The bundle is fetched by pages on other origins, so it needs CORS.
   res.setHeader('Access-Control-Allow-Origin', '*');
 
+  const url = (req.url ?? '/').split('?')[0];
+  // The picker's dataset and font live next to the bundle, under both the
+  // canonical /v1/assets/ prefix and the unversioned alias.
+  const assetMatch = /^(?:\/v1)?\/assets\/(emoji-data\.json|chat-emoji-fill\.woff2)$/.exec(url);
+
+  if (assetMatch) {
+    const file = assetMatch[1];
+    const type = file.endsWith('.json')
+      ? 'application/json; charset=utf-8'
+      : 'font/woff2';
+
+    try {
+      const body = await readFile(join(WIDGET_DIR, 'assets', file));
+      await send(res, 200, body, type);
+    } catch {
+      await send(res, 404, `asset ${file} missing`, 'text/plain; charset=utf-8');
+    }
+    return;
+  }
+
   const name = req.url === '/widget.mjs' ? 'widget.mjs' : 'widget.js';
 
   try {

@@ -3,9 +3,16 @@
  * explicit values below keep the host page's CSS from leaking in.
  */
 export const STYLES = `
+  /*
+   * The emoji fill font comes first in the stack. It is registered at runtime
+   * by document.fonts.add() with a unicode-range covering only emoji
+   * codepoints, so the browser downloads the ~1 MB file only when it meets a
+   * character the subset actually owns; font-display: swap keeps text visible
+   * while it arrives.
+   */
   :host {
     all: initial;
-    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+    font-family: 'ChatEmojiFill', -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
     --cc-theme: #2563eb;
     --cc-surface: #ffffff;
     --cc-text: #1d1d1f;
@@ -269,7 +276,9 @@ export const STYLES = `
     border: 1px solid var(--cc-hairline);
     border-radius: 12px;
     padding: 9px 12px;
-    font: inherit;
+    /* Not the 'font' shorthand: it also resets the family a form control picks
+       for itself, which would drop the emoji face the visitor typed. */
+    font-family: inherit;
     font-size: 14px;
     line-height: 1.45;
     color: var(--cc-text);
@@ -297,6 +306,205 @@ export const STYLES = `
   .send:focus-visible { outline: 2px solid var(--cc-theme); outline-offset: 2px; }
   .send svg { width: 17px; height: 17px; fill: currentColor; }
 
+  /*
+   * Emoji picker. It is a flex item of the chat card that sits between the
+   * stream and the composer, so it pushes the stream up instead of covering
+   * the last messages the way a floating popover would.
+   */
+  .emoji-picker {
+    flex: 0 0 auto;
+    display: none;
+    flex-direction: column;
+    min-height: 0;
+    border-top: 1px solid var(--cc-hairline);
+    background: var(--cc-surface);
+    max-height: min(20rem, 60%);
+  }
+  .emoji-picker.open { display: flex; }
+
+  .emoji-quick {
+    display: flex;
+    flex: 0 0 auto;
+    align-items: center;
+    gap: 4px;
+    padding: 8px 6px 0;
+  }
+  .emoji-quick button {
+    width: 28px;
+    height: 28px;
+    flex: 0 0 auto;
+    border: 0;
+    border-radius: 8px;
+    background: transparent;
+    padding: 0;
+    /* A <button> does not inherit the family; without this the fill font never
+       reaches the glyph and newer emoji fall back to the platform face. */
+    font-family: inherit;
+    font-size: 16px;
+    line-height: 1;
+    cursor: pointer;
+    display: grid;
+    place-items: center;
+  }
+  .emoji-quick button:hover { background: var(--cc-agent-bg); }
+  .emoji-quick button:focus-visible { outline: 2px solid var(--cc-theme); outline-offset: -2px; }
+
+  .emoji-search {
+    display: flex;
+    flex: 0 0 auto;
+    align-items: center;
+    gap: 6px;
+    padding: 8px 6px;
+  }
+  .emoji-search input {
+    flex: 1;
+    min-width: 0;
+    border: 1px solid var(--cc-hairline);
+    border-radius: 8px;
+    padding: 6px 8px;
+    /* A form control defaults to the platform UI font; the widget wants its own. */
+    font-family: inherit;
+    font-size: 12px;
+    color: var(--cc-text);
+    background: var(--cc-surface);
+  }
+  .emoji-search input:focus { outline: none; border-color: var(--cc-theme); }
+
+  .emoji-close {
+    flex: 0 0 auto;
+    border: 0;
+    border-radius: 8px;
+    background: transparent;
+    color: var(--cc-muted);
+    padding: 6px;
+    cursor: pointer;
+    display: grid;
+    place-items: center;
+  }
+  .emoji-close:hover { background: var(--cc-agent-bg); }
+  .emoji-close:focus-visible { outline: 2px solid var(--cc-theme); outline-offset: 1px; }
+  .emoji-close svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 2.2; }
+
+  .emoji-tabs {
+    display: flex;
+    flex: 0 0 auto;
+    align-items: center;
+    gap: 2px;
+    padding: 0 6px 6px;
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+  .emoji-tabs::-webkit-scrollbar { display: none; }
+  .emoji-tab {
+    flex: 0 0 auto;
+    border: 0;
+    border-radius: 8px;
+    background: transparent;
+    color: var(--cc-text);
+    padding: 4px 8px;
+    font-family: inherit;
+    font-size: 10px;
+    font-weight: 600;
+    white-space: nowrap;
+    cursor: pointer;
+  }
+  .emoji-tab:hover { background: var(--cc-agent-bg); }
+  .emoji-tab.active { background: var(--cc-theme); color: #fff; }
+  .emoji-tab:focus-visible { outline: 2px solid var(--cc-theme); outline-offset: -2px; }
+  .emoji-tab-icon {
+    width: 28px;
+    height: 28px;
+    padding: 0;
+    font-size: 15px;
+    font-weight: 400;
+    line-height: 1;
+    display: grid;
+    place-items: center;
+  }
+
+  .emoji-grid-wrap {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+  }
+  .emoji-heading {
+    position: sticky;
+    top: 0;
+    z-index: 1;
+    padding: 4px 8px;
+    background: var(--cc-surface);
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 0.03em;
+    text-transform: uppercase;
+    color: var(--cc-muted);
+  }
+  .emoji-grid {
+    display: grid;
+    grid-template-columns: repeat(8, 1fr);
+    gap: 2px;
+    padding: 0 6px 6px;
+  }
+  .emoji-cell {
+    height: 36px;
+    width: 100%;
+    border: 0;
+    background: transparent;
+    border-radius: 6px;
+    /* A <button> does not inherit the family; without this the fill font never
+       reaches the glyph and newer emoji fall back to the platform face. */
+    font-family: inherit;
+    font-size: 1.15rem;
+    line-height: 1;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0;
+  }
+  .emoji-cell:hover { background: var(--cc-agent-bg); }
+  .emoji-cell:focus-visible { outline: 2px solid var(--cc-theme); outline-offset: -2px; }
+
+  .emoji-empty {
+    padding: 24px 12px;
+    text-align: center;
+    font-size: 12px;
+    color: var(--cc-muted);
+  }
+  .emoji-empty p { margin: 0 0 8px; }
+  .emoji-retry {
+    border: 1px solid var(--cc-hairline);
+    border-radius: 8px;
+    background: var(--cc-surface);
+    color: var(--cc-text);
+    padding: 4px 10px;
+    font-family: inherit;
+    font-size: 11px;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  .emoji-retry:hover { background: var(--cc-agent-bg); }
+  .emoji-retry:focus-visible { outline: 2px solid var(--cc-theme); outline-offset: -1px; }
+
+  /* The composer button that opens the picker; wired up in widget.ts. */
+  .emoji-trigger {
+    flex: 0 0 auto;
+    width: 38px;
+    height: 38px;
+    border: 0;
+    border-radius: 50%;
+    background: transparent;
+    color: var(--cc-muted);
+    padding: 0;
+    cursor: pointer;
+    display: grid;
+    place-items: center;
+  }
+  .emoji-trigger:hover { background: var(--cc-agent-bg); }
+  .emoji-trigger:focus-visible { outline: 2px solid var(--cc-theme); outline-offset: 2px; }
+  .emoji-trigger svg { width: 18px; height: 18px; fill: currentColor; }
+
   .error {
     margin: 0 14px 10px;
     padding: 8px 10px;
@@ -319,6 +527,10 @@ export const STYLES = `
       border: 0;
     }
     .launcher { right: 16px; bottom: 16px; }
+    /* The picker shares the full-screen card with the stream; keep a slice of
+       the conversation visible above it. */
+    .emoji-picker { max-height: 45vh; }
+    .emoji-grid { grid-template-columns: repeat(8, 1fr); }
   }
 
   @media (prefers-reduced-motion: reduce) {

@@ -1,70 +1,70 @@
 [
   {
     "name": "Tiệm Bánh Mộc",
-    "publicKey": "pk_9e699d249ee44c8ff97f2f822a62652e",
+    "publicKey": "pk_f233cfcb5e6d2cc4850da200e7aef87f",
     "title": "Tiệm Bánh Mộc",
     "themeColor": "#B45309",
     "greeting": "Bánh mới ra lò mỗi 4 tiếng. Bạn cần tư vấn đặt bánh?"
   },
   {
     "name": "Spa Sen Hồng",
-    "publicKey": "pk_21fdc707f080e6b923dd801b81cb5fc7",
+    "publicKey": "pk_802473952c106790294721e177b926bd",
     "title": "Spa Sen Hồng",
     "themeColor": "#DB2777",
     "greeting": "Chào bạn! Cần đặt lịch chăm sóc da hay massage không?"
   },
   {
     "name": "Nội Thất Gỗ Việt",
-    "publicKey": "pk_a233fc3b13fa6948a7c84791327ab9e2",
+    "publicKey": "pk_3a7ca6e952f0201b6230977a273fc3fc",
     "title": "Nội Thất Gỗ Việt",
     "themeColor": "#92400E",
     "greeting": "Cần báo giá nội thất phòng khách? Nhắn mình nhé!"
   },
   {
     "name": "Du Lịch Biển Xanh",
-    "publicKey": "pk_de16afae1333ca482ef2f36d09f8e2b3",
+    "publicKey": "pk_64804df0706b1cf3c23d8e46cb9e42b6",
     "title": "Du Lịch Biển Xanh",
     "themeColor": "#0891B2",
     "greeting": "Bạn muốn đi biển ở đâu mùa này? Mình tư vấn tour."
   },
   {
     "name": "Phòng Gym Titan",
-    "publicKey": "pk_b17752ad071f1cfb4d6b52f2ae5fbcd8",
+    "publicKey": "pk_53e4d0c663b70fbbc76f18466849be5d",
     "title": "Phòng Gym Titan",
     "themeColor": "#DC2626",
     "greeting": "Sẵn sàng tập luyện? Hỏi mình về gói tập và PT nhé!"
   },
   {
     "name": "Hiệu Sách Trí Tuệ",
-    "publicKey": "pk_121334250d2525fa37f17ec88678123a",
+    "publicKey": "pk_12d3dc6c6b7bc486ed29b176f0e0a794",
     "title": "Hiệu Sách Trí Tuệ",
     "themeColor": "#4F46E5",
     "greeting": "Bạn đang tìm sách gì? Mình gợi ý đầu sách phù hợp."
   },
   {
     "name": "Nha Khoa An Nhiên",
-    "publicKey": "pk_23ca21032297ed89d82cdc9ee40c4dc5",
+    "publicKey": "pk_a10b650a5c446975a7ec164319b06ac8",
     "title": "Nha Khoa An Nhiên",
     "themeColor": "#0D9488",
     "greeting": "Đặt lịch khám răng miễn phí, không đau, không chờ."
   },
   {
     "name": "Cà Phê Mộc Trà",
-    "publicKey": "pk_cec20a0cd33ef572b343016ce032f410",
+    "publicKey": "pk_cd9663d3b94b6b5048711bbefbf71699",
     "title": "Cà Phê Mộc Trà",
     "themeColor": "#166534",
     "greeting": "Hôm nay bạn uống gì? Mình gợi ý món mới."
   },
   {
     "name": "Thời Trang Lụa Việt",
-    "publicKey": "pk_f39aec11dcd70ea66faee3c41a1fbdcc",
+    "publicKey": "pk_5377b4577f2eadde9434862034a2333a",
     "title": "Thời Trang Lụa Việt",
     "themeColor": "#7C3AED",
     "greeting": "Cần tư vấn size và chất liệu lụa? Nhắn mình ngay."
   },
   {
     "name": "Công Nghệ TechOne",
-    "publicKey": "pk_0b630382e925a21756128d16fc5ecc38",
+    "publicKey": "pk_25ed311139485a344adbce5d9e2bcdbe",
     "title": "Công Nghệ TechOne",
     "themeColor": "#0071E3",
     "greeting": "Cần hỗ trợ kỹ thuật? Chat ngay, mình xử lý trong 5 phút."

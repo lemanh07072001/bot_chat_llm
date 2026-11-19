@@ -1,5 +1,7 @@
 import { io, type Socket } from 'socket.io-client';
 import { createSession, fetchOlderMessages, saveContact, fetchAvailability } from './api.js';
+import { registerEmojiFont, resolveAssetBase } from './emoji-assets.js';
+import { EmojiPicker } from './emoji-picker.js';
 import { STYLES } from './styles.js';
 import type {
   AgentProfile,
@@ -15,6 +17,7 @@ const LABELS = {
   launcherOpen: 'Mở hộp chat',
   close: 'Đóng hộp chat',
   send: 'Gửi tin nhắn',
+  emojiPicker: 'Chèn biểu tượng cảm xúc',
   placeholder: 'Nhập tin nhắn…',
   connecting: 'Đang kết nối…',
   online: 'Đang trực tuyến',
@@ -58,6 +61,7 @@ const ICONS = {
   chat: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21 11.5a8.4 8.4 0 0 1-8.5 8.4 9 9 0 0 1-3.8-.8L3 21l1.9-5.1a8.1 8.1 0 0 1-.9-3.7A8.4 8.4 0 0 1 12.5 4 8.4 8.4 0 0 1 21 11.5z" stroke-linecap="round" stroke-linejoin="round"/></svg>',
   close: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18" stroke-linecap="round"/></svg>',
   send: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3.4 20.4l17.4-7.5a1 1 0 0 0 0-1.8L3.4 3.6a1 1 0 0 0-1.4 1.2L4.2 11 14 12l-9.8 1 -2.2 6.2a1 1 0 0 0 1.4 1.2z"/></svg>',
+  smile: '<svg viewBox="0 0 24 24" aria-hidden="true" fill="currentColor"><path fill-rule="evenodd" d="M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18zM9.2 8.1a1.4 1.4 0 1 0 0 2.8 1.4 1.4 0 0 0 0-2.8zm5.6 0a1.4 1.4 0 1 0 0 2.8 1.4 1.4 0 0 0 0-2.8zM8.1 13.4a4 4 0 0 0 7.8 0z"/></svg>',
 };
 
 export class ChatWidget implements ChatWidgetInstance {
@@ -74,6 +78,8 @@ export class ChatWidget implements ChatWidgetInstance {
   private readonly errorEl: HTMLDivElement;
   private readonly input: HTMLTextAreaElement;
   private readonly sendButton: HTMLButtonElement;
+  private readonly emojiTrigger: HTMLButtonElement;
+  private readonly emojiHost: HTMLDivElement;
   private readonly loadOlderWrap: HTMLDivElement;
   private readonly loadOlderButton: HTMLButtonElement;
   private readonly contactForm: HTMLFormElement;
@@ -112,6 +118,16 @@ export class ChatWidget implements ChatWidgetInstance {
   private agentTypingTimer: ReturnType<typeof setTimeout> | null = null;
   private destroyed = false;
   private availabilityTimer: ReturnType<typeof setInterval> | null = null;
+  /** Built on the first trigger press, so a visitor who never picks one pays nothing. */
+  private picker: EmojiPicker | null = null;
+  /**
+   * Where the caret was when the composer last had focus.
+   *
+   * Pressing the trigger moves focus off the textarea, and a textarea that is
+   * not focused still reports its selection — but only until something else
+   * sets it, so it is captured on every interaction that can move it.
+   */
+  private draftSelection: { start: number; end: number } | null = null;
 
   private readonly options: ChatWidgetOptions;
 
@@ -148,7 +164,11 @@ export class ChatWidget implements ChatWidgetInstance {
           </div>
           <button class="contact-send" type="submit"></button>
         </form>
+        <!-- display:contents keeps the picker a flex item of the card, which
+             is the layout .emoji-picker is written for. -->
+        <div class="emoji-host" style="display: contents"></div>
         <div class="composer">
+          <button class="emoji-trigger" type="button" aria-expanded="false" data-emoji-trigger>${ICONS.smile}</button>
           <textarea class="input" rows="1"></textarea>
           <button class="send" type="button" disabled>${ICONS.send}</button>
         </div>
@@ -169,6 +189,8 @@ export class ChatWidget implements ChatWidgetInstance {
     this.errorEl = this.must('.error');
     this.input = this.must('.input');
     this.sendButton = this.must('.send');
+    this.emojiTrigger = this.must('.emoji-trigger');
+    this.emojiHost = this.must('.emoji-host');
     this.loadOlderWrap = this.must('.load-older');
     this.loadOlderButton = this.must('.load-older-button');
     this.contactForm = this.must('.contact');
@@ -179,6 +201,13 @@ export class ChatWidget implements ChatWidgetInstance {
 
     this.applyLabels();
     this.bindEvents();
+
+    // Registered here, once per page: adding the face costs nothing (no
+    // download until a matching glyph is painted), and doing it only when the
+    // picker opens would leave agent messages with emoji rendered by the
+    // platform font — the exact tofu the fill font exists to fix. The
+    // unicode-range keeps the 1 MB download tied to an actual emoji on screen.
+    void registerEmojiFont(this.assetBase()).catch(() => undefined);
 
     (this.options.target ?? document.body).appendChild(this.host);
   }
@@ -197,6 +226,8 @@ export class ChatWidget implements ChatWidgetInstance {
     this.launcher.setAttribute('aria-label', LABELS.launcherOpen);
     this.must<HTMLButtonElement>('.close').setAttribute('aria-label', LABELS.close);
     this.sendButton.setAttribute('aria-label', LABELS.send);
+    this.emojiTrigger.setAttribute('aria-label', LABELS.emojiPicker);
+    this.emojiTrigger.title = LABELS.emojiPicker;
     this.input.setAttribute('aria-label', LABELS.placeholder);
     this.input.placeholder = LABELS.placeholder;
     this.titleEl.textContent = this.options.title ?? LABELS.defaultTitle;
@@ -214,17 +245,36 @@ export class ChatWidget implements ChatWidgetInstance {
     this.must<HTMLButtonElement>('.close').addEventListener('click', () => this.close());
 
     this.input.addEventListener('input', () => {
-      this.autoGrow();
-      this.sendButton.disabled = !this.input.value.trim();
-      this.notifyTyping();
+      this.rememberSelection();
+      this.onDraftChanged();
     });
 
     this.input.addEventListener('keydown', (event) => {
+      // A Vietnamese IME uses Enter to commit the word being composed.
+      if (event.isComposing || event.keyCode === 229) {
+        return;
+      }
+
       if (event.key === 'Enter' && !event.shiftKey) {
         event.preventDefault();
         void this.send();
+        return;
       }
+
+      // Arrows, Home, End, Backspace: any of them can move the caret, and the
+      // selection is read on the next keyup so the picker inserts where the
+      // visitor left off.
+      this.rememberSelection();
     });
+
+    // The trigger takes focus away from the textarea, so the caret has to be
+    // captured while the composer still reports one.
+    this.input.addEventListener('keyup', () => this.rememberSelection());
+    this.input.addEventListener('click', () => this.rememberSelection());
+    this.input.addEventListener('select', () => this.rememberSelection());
+    this.input.addEventListener('blur', () => this.rememberSelection());
+
+    this.emojiTrigger.addEventListener('click', () => this.toggleEmojiPicker());
 
     this.sendButton.addEventListener('click', () => void this.send());
     this.loadOlderButton.addEventListener('click', () => void this.loadOlder());
@@ -241,6 +291,106 @@ export class ChatWidget implements ChatWidgetInstance {
     });
   }
 
+  /**
+   * Everything that has to follow a change to the draft, whether it came from
+   * typing or from `insertRangeText` — which does not fire `input` itself.
+   */
+  private onDraftChanged(): void {
+    this.autoGrow();
+    this.sendButton.disabled = !this.input.value.trim();
+    this.notifyTyping();
+  }
+
+  /** Where the emoji dataset and font live; resolved once, shared by the font and the picker. */
+  private assetBase(): string {
+    // Normalised here too: an `assetBaseUrl` option passed without a trailing
+    // slash would otherwise glue `emoji-data.json` onto the last segment.
+    return resolveAssetBase(this.options.assetBaseUrl, undefined, this.options.apiUrl);
+  }
+
+  /** Saves the caret so the picker can put the emoji back where it belongs. */
+  private rememberSelection(): void {
+    const { selectionStart, selectionEnd } = this.input;
+
+    if (selectionStart !== null && selectionEnd !== null) {
+      this.draftSelection = { start: selectionStart, end: selectionEnd };
+    }
+  }
+
+  /** Idempotent: `close()` is a no-op on an already closed picker. */
+  private closeEmojiPicker(): void {
+    this.picker?.close();
+    this.emojiTrigger.setAttribute('aria-expanded', 'false');
+  }
+
+  private toggleEmojiPicker(): void {
+    this.rememberSelection();
+
+    if (!this.picker) {
+      const picker = new EmojiPicker({
+        assetBase: this.assetBase(),
+        onPick: (emoji) => this.insertEmoji(emoji),
+        onClose: (reason) => {
+          this.emojiTrigger.setAttribute('aria-expanded', 'false');
+
+          // A press elsewhere on the page belongs to the page: pulling focus
+          // back into a hidden-in-a-shadow-root textarea would swallow whatever
+          // the visitor clicked.
+          if (reason === 'outside' || this.input.disabled) {
+            return;
+          }
+
+          this.input.focus();
+        },
+      });
+
+      this.emojiHost.append(picker.element);
+      this.picker = picker;
+    }
+
+    // The picker's own outside-press listener ignores `data-emoji-trigger`, so
+    // the two never fight over this click: it is opened here, and toggling an
+    // already-open panel closes it here as well.
+    this.picker.toggle();
+    this.emojiTrigger.setAttribute('aria-expanded', String(this.picker.isOpen));
+  }
+
+  /**
+   * Puts a glyph at the saved caret.
+   *
+   * Focus goes back to the textarea first: `setRangeText` on a control that is
+   * not focused would still work, but the caret would only be correct after
+   * the next focus.
+   */
+  private insertEmoji(emoji: string): void {
+    // The picker can stay open while the composer is locked (maintenance, or
+    // the socket dropping): inserting then would rewrite a disabled field and
+    // light up a send button that cannot send.
+    if (this.maintenance || this.input.disabled) {
+      return;
+    }
+
+    const value = this.input.value;
+    // A focused textarea reports the truth right now; the snapshot only has to
+    // stand in once the trigger has taken focus away.
+    const live = this.root.activeElement === this.input ? this.input : null;
+    const from = live
+      ? { start: live.selectionStart ?? value.length, end: live.selectionEnd ?? value.length }
+      : this.draftSelection;
+    const fallback = value.length;
+    const start = Math.min(from?.start ?? fallback, value.length);
+    const end = Math.min(from?.end ?? start, value.length);
+
+    this.input.focus();
+    this.input.setRangeText(emoji, start, end, 'end');
+
+    const caret = start + emoji.length;
+
+    this.draftSelection = { start: caret, end: caret };
+    // `setRangeText` does not fire `input`, so the shared handler has to run.
+    this.onDraftChanged();
+  }
+
   open(): void {
     this.isOpen = true;
     this.panel.classList.add('open');
@@ -255,9 +405,11 @@ export class ChatWidget implements ChatWidgetInstance {
     this.isOpen = false;
     this.panel.classList.remove('open');
     this.launcher.setAttribute('aria-expanded', 'false');
+    this.closeEmojiPicker();
     this.launcher.focus();
   }
 
+  /** The picker is a child of the card, so it has to go when the card does. */
   destroy(): void {
     this.destroyed = true;
     if (this.availabilityTimer) clearInterval(this.availabilityTimer);
@@ -265,6 +417,9 @@ export class ChatWidget implements ChatWidgetInstance {
     this.socket = null;
     if (this.typingIdleTimer) clearTimeout(this.typingIdleTimer);
     if (this.agentTypingTimer) clearTimeout(this.agentTypingTimer);
+    // Before the host is detached: the picker drops its document listener.
+    this.picker?.destroy();
+    this.picker = null;
     this.host.remove();
   }
 
@@ -639,6 +794,7 @@ export class ChatWidget implements ChatWidgetInstance {
     }
 
     this.input.value = '';
+    this.draftSelection = { start: 0, end: 0 };
     this.autoGrow();
     this.sendButton.disabled = true;
     this.stopTyping();
@@ -648,10 +804,16 @@ export class ChatWidget implements ChatWidgetInstance {
       | null;
 
     if (!ack?.ok) {
-      // Hand the text back so nothing the visitor typed is silently lost.
-      this.input.value = body;
-      this.autoGrow();
-      this.sendButton.disabled = false;
+      // Hand the text back so nothing the visitor typed is silently lost — but
+      // only into an empty composer. If they have already started the next
+      // message, overwriting it with the failed one would delete that work.
+      if (!this.input.value) {
+        this.input.value = body;
+        this.draftSelection = { start: body.length, end: body.length };
+        this.autoGrow();
+        this.sendButton.disabled = false;
+      }
+
       this.showError(ack?.error ?? LABELS.failed);
       return;
     }
@@ -807,6 +969,7 @@ export class ChatWidget implements ChatWidgetInstance {
 
   private setMaintenance(value: boolean): void {
     this.maintenance = value;
+    if (value) this.closeEmojiPicker();
     let notice = this.root.querySelector<HTMLDivElement>('.maintenance-notice');
     if (!notice) { notice = document.createElement('div'); notice.className = 'maintenance-notice'; notice.setAttribute('role', 'status'); this.body.before(notice); }
     notice.textContent = 'Hệ thống chat đang bảo trì. Vui lòng quay lại sau.';
@@ -819,6 +982,10 @@ export class ChatWidget implements ChatWidgetInstance {
   private setComposerEnabled(enabled: boolean): void {
     enabled = enabled && !this.maintenance;
     this.input.disabled = !enabled;
+    // A locked composer cannot take a glyph, so the trigger is closed off too
+    // rather than opening a panel of buttons that do nothing.
+    this.emojiTrigger.disabled = !enabled;
+    if (!enabled) this.closeEmojiPicker();
     this.sendButton.disabled = !enabled || !this.input.value.trim();
   }
 

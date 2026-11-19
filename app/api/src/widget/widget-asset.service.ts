@@ -4,7 +4,20 @@ import { isAbsolute, join, resolve } from 'node:path';
 import { Injectable, Logger, ServiceUnavailableException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 
-export type WidgetAssetName = 'widget.js' | 'widget.mjs';
+export type WidgetAssetName =
+  | 'widget.js'
+  | 'widget.mjs'
+  | 'emoji-data.json'
+  | 'chat-emoji-fill.woff2';
+
+/**
+ * The two bundle files sit at the root of the asset dir, the emoji files in
+ * `assets/`, which mirrors what `vite build` copies out of `widget/public`.
+ */
+const SUBDIR: Partial<Record<WidgetAssetName, string>> = {
+  'emoji-data.json': 'assets',
+  'chat-emoji-fill.woff2': 'assets',
+};
 
 export interface WidgetAsset {
   name: WidgetAssetName;
@@ -26,6 +39,9 @@ interface CacheEntry {
  * same origin as the api means the embed snippet needs nothing but the key —
  * the widget derives its api url from its own script src — and the two can
  * never drift apart in version.
+ *
+ * The emoji dataset and fill font ride along for the same reason: they are
+ * fetched lazily by the picker, and the widget only needs to know the base url.
  */
 @Injectable()
 export class WidgetAssetService {
@@ -50,14 +66,17 @@ export class WidgetAssetService {
   }
 
   async load(name: WidgetAssetName): Promise<WidgetAsset> {
-    const path = join(this.dir, name);
+    const subdir = SUBDIR[name];
+    const path = subdir ? join(this.dir, subdir, name) : join(this.dir, name);
 
     let stats: Awaited<ReturnType<typeof stat>>;
     try {
       stats = await stat(path);
     } catch {
-      this.logger.error(`Widget bundle missing at ${path} — run \`npm run build\` in widget/`);
-      throw new ServiceUnavailableException('Widget bundle is not built yet');
+      this.logger.error(
+        `Widget asset missing at ${path} — run \`npm run build\` in widget/ (or copy widget/public/assets if the build is stale)`,
+      );
+      throw new ServiceUnavailableException(`Widget asset ${name} is not built yet`);
     }
 
     const stamp = `${stats.mtimeMs}:${stats.size}`;

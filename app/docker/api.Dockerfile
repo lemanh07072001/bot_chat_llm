@@ -10,6 +10,9 @@ COPY widget/package.json widget/package-lock.json ./
 RUN npm ci
 COPY widget/tsconfig.json widget/vite.config.ts ./
 COPY widget/src ./src
+# `vite build` copies public/ into dist/, which is where the api finds the
+# emoji dataset and fill font.
+COPY widget/public ./public
 RUN npm run build
 
 FROM node:24-alpine AS api-build

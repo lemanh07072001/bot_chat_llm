@@ -21,7 +21,15 @@ async function bootstrap() {
   // The widget bundle is served from the api origin so the embed snippet can be
   // a plain script url; those routes must stay outside the `api` prefix.
   app.setGlobalPrefix('api', {
-    exclude: ['widget.js', 'v1/widget.js', 'v1/widget.mjs'],
+    exclude: [
+      'widget.js',
+      'v1/widget.js',
+      'v1/widget.mjs',
+      'v1/assets/emoji-data.json',
+      'v1/assets/chat-emoji-fill.woff2',
+      'assets/emoji-data.json',
+      'assets/chat-emoji-fill.woff2',
+    ],
   });
   app.useGlobalPipes(
     new ValidationPipe({

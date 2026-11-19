@@ -15,5 +15,7 @@ if (!publicKey) {
   init({
     publicKey,
     apiUrl: import.meta.env.VITE_API_URL ?? 'http://localhost:3000/api',
+    // Vite serves `public/` from the dev server root, so the assets are here.
+    assetBaseUrl: new URL('/assets/', window.location.href).href,
   });
 }
