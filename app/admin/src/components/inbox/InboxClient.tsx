@@ -42,7 +42,6 @@ import {
   Italic,
   Code,
   Quote,
-  Languages,
 } from "lucide-react";
 import type {
   ChatMessage,
@@ -51,16 +50,9 @@ import type {
   InboxFilter,
   ProjectRef,
 } from "@/lib/chat";
-import { INBOX_FILTERS, filterToQuery, matchesFilter, translationFor, visitorLabel } from "@/lib/chat";
+import { INBOX_FILTERS, filterToQuery, matchesFilter, visitorLabel } from "@/lib/chat";
 import { InternalNotes } from "./InternalNotes";
 import { type AccountPreferences } from "./preferences";
-import {
-  DEFAULT_TRANSLATION_LANGUAGE,
-  detectLanguage,
-  isTranslationLanguage,
-  translationIsEnabled,
-  translationLanguageLabel,
-} from "@/lib/translation";
 import { getChatTheme, type ChatTheme } from "./chatThemes";
 import {
   DEFAULT_CANNED_TEMPLATES,
@@ -246,7 +238,6 @@ export function InboxClient({
   const searchRef = useRef("");
   const listRequestVersion = useRef(0);
   const [soundEnabled, setSoundEnabled] = useState(true);
-  const [translationLanguage, setTranslationLanguage] = useState(DEFAULT_TRANSLATION_LANGUAGE);
   const [personalTemplates, setPersonalTemplates] = useState<CannedTemplate[]>(
     DEFAULT_CANNED_TEMPLATES,
   );
@@ -273,13 +264,6 @@ export function InboxClient({
       preferencesRef.current = preferences;
       setSoundEnabled(preferences.soundEnabled ?? true);
       setPersonalTemplates(resolvePersonalTemplates(preferences));
-      // The stored preference is the language this agent reads; a blank value
-      // (or one from a newer build) falls back to the house default.
-      setTranslationLanguage(
-        isTranslationLanguage(preferences.translationLanguage ?? "")
-          ? String(preferences.translationLanguage)
-          : DEFAULT_TRANSLATION_LANGUAGE,
-      );
     };
     const listener = (event: Event) => {
       controller.abort();
@@ -976,10 +960,6 @@ export function InboxClient({
               siteName={projects.find((project) => project.id === selected.siteId)?.name}
               key={selected.id}
               conversation={selected}
-              translationLanguage={translationLanguage}
-              siteTranslationEnabled={
-                projects.find((project) => project.id === selected.siteId)?.translation !== false
-              }
               initialThread={initialThread?.conversation.id === selected.id ? initialThread : null}
               isProjectOwner={
                 projects.find((project) => project.id === selected.siteId)?.access === "owner"
@@ -1017,10 +997,6 @@ export function InboxClient({
 interface ConversationThreadProps {
   personalTemplates: CannedTemplate[];
   siteName?: string;
-  /** The language this agent reads; translations display in it. */
-  translationLanguage: string;
-  /** False when the project opted out of machine translation. */
-  siteTranslationEnabled: boolean;
   initialThread?: InitialThread | null;
   conversation: Conversation;
   isProjectOwner: boolean;
@@ -1038,15 +1014,6 @@ interface ConversationThreadProps {
   ) => Promise<void>;
   currentTheme: ChatTheme;
 }
-
-/** A translated draft, kept apart from the draft itself so nothing is lost. */
-type DraftTranslation = {
-  /** The draft this was made from; an edit marks the panel stale. */
-  source: string;
-  text: string;
-  target: string;
-  same: boolean;
-};
 
 function formatDateDivider(iso: string): string {
   try {
@@ -1074,8 +1041,6 @@ function formatDateDivider(iso: string): string {
 function ConversationThread({
   personalTemplates,
   siteName,
-  translationLanguage,
-  siteTranslationEnabled,
   conversation,
   initialThread,
   isProjectOwner,
@@ -1108,6 +1073,7 @@ function ConversationThread({
   const [reactions, setReactions] = useState<Record<string, Record<string, number>>>({});
 
   const cannedMenuRef = useRef<HTMLDivElement | null>(null);
+  const cannedPanelRef = useRef<HTMLDivElement | null>(null);
   const emojiPickerRef = useRef<HTMLDivElement | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const scrollRef = useRef<HTMLDivElement | null>(null);
@@ -1136,132 +1102,10 @@ function ConversationThread({
     () => (slash ? searchCanned(groups, slash.query).slice(0, 8) : []),
     [slash, groups],
   );
-
-  // --- Translation ---------------------------------------------------------
-  // Nothing here sends anything to the visitor: a translation is displayed for
-  // the agent, or placed in the draft for them to review and send themselves.
-  const [translationReady, setTranslationReady] = useState(false);
-  const [translatingId, setTranslatingId] = useState<string | null>(null);
-  const [hiddenTranslations, setHiddenTranslations] = useState<Record<string, true>>({});
-  /** Messages the api answered "already in your language" for. */
-  const [sameLanguageIds, setSameLanguageIds] = useState<Record<string, true>>({});
-  const [draftTranslation, setDraftTranslation] = useState<DraftTranslation | null>(null);
-  const [translatingDraft, setTranslatingDraft] = useState(false);
-
-  useEffect(() => {
-    let alive = true;
-    translationIsEnabled().then((enabled) => {
-      if (alive) setTranslationReady(enabled);
-    });
-    return () => {
-      alive = false;
-    };
-  }, []);
-
-  // Both have to say yes: the install must have a provider, and this project's
-  // owner must allow its threads to be sent to that provider.
-  const translationEnabled = translationReady && siteTranslationEnabled;
-
-  /**
-   * Best guess at the visitor's language, taken from what they last wrote. Used
-   * as the target of a reply the agent wants translated before sending.
-   */
-  const visitorLanguage = useMemo(() => {
-    for (let index = messages.length - 1; index >= 0; index -= 1) {
-      const message = messages[index];
-      if (message.senderKind === "visitor" && message.body.trim()) {
-        return detectLanguage(message.body);
-      }
-    }
-    return "en";
-  }, [messages]);
-
-  async function translateOne(message: ChatMessage) {
-    if (translatingId) return;
-    setTranslatingId(message.id);
-
-    try {
-      const response = await fetch(
-        `/api/conversations/${conversationId}/messages/${message.id}/translate`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ target: translationLanguage }),
-        },
-      );
-      const data = (await response.json().catch(() => null)) as
-        | { message?: ChatMessage; translation?: { same?: boolean }; error?: string }
-        | null;
-
-      if (!response.ok || !data?.message) {
-        onError(data?.error ?? "Không dịch được tin nhắn.");
-        return;
-      }
-
-      const updated = data.message;
-
-      // The api returns the message untouched when it already reads in the
-      // agent's language; saying so beats a button that appears to do nothing.
-      if (data.translation?.same) {
-        setSameLanguageIds((previous) => ({ ...previous, [message.id]: true }));
-        return;
-      }
-
-      setMessages((previous) =>
-        previous.map((item) =>
-          item.id === updated.id ? { ...item, translations: updated.translations } : item,
-        ),
-      );
-      setHiddenTranslations((previous) => {
-        const next = { ...previous };
-        delete next[message.id];
-        return next;
-      });
-      setSameLanguageIds((previous) => {
-        const next = { ...previous };
-        delete next[message.id];
-        return next;
-      });
-    } catch {
-      onError("Không kết nối được máy chủ dịch.");
-    } finally {
-      setTranslatingId(null);
-    }
-  }
-
-  async function translateDraft() {
-    const text = draft.trim();
-    if (!text || translatingDraft) return;
-
-    setTranslatingDraft(true);
-
-    try {
-      const response = await fetch("/api/translation", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ text, target: visitorLanguage }),
-      });
-      const data = (await response.json().catch(() => null)) as
-        | { text?: string; target?: string; same?: boolean; error?: string }
-        | null;
-
-      if (!response.ok || typeof data?.text !== "string") {
-        onError(data?.error ?? "Không dịch được bản nháp.");
-        return;
-      }
-
-      setDraftTranslation({
-        source: text,
-        text: data.text,
-        target: data.target ?? visitorLanguage,
-        same: Boolean(data.same),
-      });
-    } catch {
-      onError("Không kết nối được máy chủ dịch.");
-    } finally {
-      setTranslatingDraft(false);
-    }
-  }
+  const totalCannedCount = useMemo(
+    () => groups.reduce((acc, g) => acc + g.templates.length, 0),
+    [groups],
+  );
 
   useEffect(() => {
     let cancelled = false;
@@ -1354,27 +1198,13 @@ function ConversationThread({
       }
     };
 
-    // Translations are stored server-side and announced to the project's agents
-    // instead of the conversation room, so a second agent sees them without a
-    // refetch — and visitors never receive the agent's language.
-    const onMessageUpdated = (message: ChatMessage) => {
-      if (message.conversationId !== conversationId) return;
-      setMessages((previous) =>
-        previous.map((item) =>
-          item.id === message.id ? { ...item, translations: message.translations } : item,
-        ),
-      );
-    };
-
     socket.on("message:new", onMessage);
-    socket.on("message:updated", onMessageUpdated);
     socket.on("typing", onTyping);
     socket.on("ready", join);
     join();
 
     return () => {
       socket.off("message:new", onMessage);
-      socket.off("message:updated", onMessageUpdated);
       socket.off("typing", onTyping);
       socket.off("ready", join);
       socket.emit("conversation:leave", { conversationId });
@@ -1428,10 +1258,16 @@ function ConversationThread({
 
   useEffect(() => {
     const handleClickOutside = (e: MouseEvent) => {
-      if (cannedMenuRef.current && !cannedMenuRef.current.contains(e.target as Node)) {
+      const target = e.target as Node;
+      if (
+        cannedMenuRef.current &&
+        !cannedMenuRef.current.contains(target) &&
+        cannedPanelRef.current &&
+        !cannedPanelRef.current.contains(target)
+      ) {
         setShowCannedMenu(false);
       }
-      if (emojiPickerRef.current && !emojiPickerRef.current.contains(e.target as Node)) {
+      if (emojiPickerRef.current && !emojiPickerRef.current.contains(target)) {
         setShowEmojiPicker(false);
       }
     };
@@ -1776,12 +1612,6 @@ function ConversationThread({
                 const msgReactions = reactions[message.id] || {};
                 const reactionKeys = Object.keys(msgReactions);
 
-                // A translation is fetched once and stored on the message, so
-                // reopening the conversation shows it without paying again.
-                const storedTranslation = translationFor(message, translationLanguage);
-                const translationShown =
-                  Boolean(storedTranslation) && !hiddenTranslations[message.id];
-
                 return (
                   <Fragment key={message.id}>
                     {showDivider && (
@@ -1840,54 +1670,6 @@ function ConversationThread({
                               <span className="text-[9px] text-emerald-500 font-medium">Đã chép</span>
                             )}
                           </button>
-                          {translationEnabled && message.body.trim() && (
-                            <>
-                              <span className="w-px h-3 bg-neutral-300 dark:bg-white/20 mx-0.5" />
-                              <button
-                                type="button"
-                                disabled={translatingId === message.id}
-                                onClick={() => {
-                                  if (!storedTranslation) {
-                                    void translateOne(message);
-                                    return;
-                                  }
-                                  // Already translated: the header button only
-                                  // folds the block away without refetching.
-                                  setHiddenTranslations((previous) => {
-                                    const next = { ...previous };
-                                    if (next[message.id]) delete next[message.id];
-                                    else next[message.id] = true;
-                                    return next;
-                                  });
-                                }}
-                                className="p-1 hover:text-amber-600 transition cursor-pointer text-[10px] flex items-center gap-0.5 disabled:opacity-50"
-                                title={
-                                  sameLanguageIds[message.id]
-                                    ? "Tin nhắn đã ở ngôn ngữ bạn đọc"
-                                    : storedTranslation
-                                      ? translationShown
-                                        ? "Ẩn bản dịch"
-                                        : "Hiện bản dịch"
-                                      : `Dịch sang ${translationLanguageLabel(translationLanguage)}`
-                                }
-                              >
-                                {translatingId === message.id ? (
-                                  <Loader2 className="w-3 h-3 animate-spin" />
-                                ) : (
-                                  <Languages className="w-3 h-3" />
-                                )}
-                                <span className="text-[9px]">
-                                  {storedTranslation
-                                    ? translationShown
-                                      ? "Ẩn"
-                                      : "Hiện"
-                                    : sameLanguageIds[message.id]
-                                      ? "Trùng"
-                                      : "Dịch"}
-                                </span>
-                              </button>
-                            </>
-                          )}
                         </div>
 
                         {/* Sender Label */}
@@ -1911,34 +1693,6 @@ function ConversationThread({
                         >
                           {message.body}
                         </div>
-
-                        {/* Stored Translation — visible to the agent only */}
-                        {storedTranslation && translationShown && (
-                          <div
-                            className={`mt-1 rounded-xl border border-dashed px-3 py-2 text-xs sm:text-[13px] leading-relaxed whitespace-pre-wrap [overflow-wrap:anywhere] ${currentTheme.classes.translationBlock}`}
-                          >
-                            <div className="flex items-center justify-between gap-2 mb-1">
-                              <span className="inline-flex items-center gap-1 text-[10px] font-medium uppercase tracking-wide opacity-70">
-                                <Languages className="w-3 h-3" />
-                                Bản dịch · {translationLanguageLabel(storedTranslation.lang)}
-                              </span>
-                              <button
-                                type="button"
-                                onClick={() =>
-                                  setHiddenTranslations((previous) => ({
-                                    ...previous,
-                                    [message.id]: true,
-                                  }))
-                                }
-                                className="text-[10px] opacity-60 hover:opacity-100 cursor-pointer"
-                                title="Ẩn bản dịch này"
-                              >
-                                Ẩn
-                              </button>
-                            </div>
-                            {storedTranslation.text}
-                          </div>
-                        )}
 
                         {/* Reaction Badges */}
                         {reactionKeys.length > 0 && (
@@ -2007,7 +1761,43 @@ function ConversationThread({
       </div>
 
       {/* 3. SaaS Composer Box */}
-      <div className={`p-3 sm:p-4 shrink-0 transition-colors ${currentTheme.classes.composerWrapper}`}>
+      <div className={`p-3 sm:p-4 shrink-0 transition-colors relative ${currentTheme.classes.composerWrapper}`}>
+        {/* Floating Slash Autocomplete Palette */}
+        {slash && (
+          <div className="absolute bottom-full left-3 sm:left-4 mb-2 z-50 animate-in fade-in slide-in-from-bottom-2 duration-150">
+            <CannedSuggestions
+              hits={slashHits}
+              activeIndex={slashIndex}
+              onHover={setSlashIndex}
+              onPick={(template) =>
+                insertCanned(template, {
+                  start: slash.start,
+                  end: slash.start + slash.query.length + 1,
+                })
+              }
+              theme={currentTheme}
+            />
+          </div>
+        )}
+
+        {/* Floating Full Canned Responses Modal / Palette */}
+        {showCannedMenu && (
+          <div
+            ref={cannedPanelRef}
+            className="absolute bottom-full left-3 sm:left-4 mb-2 z-50 animate-in fade-in slide-in-from-bottom-2 duration-150"
+          >
+            <CannedPickerPanel
+              personal={personalTemplates}
+              effective={effective}
+              siteName={siteName}
+              onPick={(template) => insertCanned(template)}
+              onClose={() => setShowCannedMenu(false)}
+              canManageSite={isProjectOwner}
+              theme={currentTheme}
+            />
+          </div>
+        )}
+
         {closed && (
           <div className="mb-2.5 px-3.5 py-2 rounded-xl bg-amber-500/10 border border-amber-500/30 text-xs text-amber-600 dark:text-amber-400 flex items-center justify-between gap-2 shadow-2xs animate-in fade-in">
             <div className="flex items-center gap-2">
@@ -2029,76 +1819,8 @@ function ConversationThread({
 
         {/* Outer SaaS Input Container */}
         <div
-          className={`transition-all flex flex-col overflow-hidden ${currentTheme.classes.composerInner}`}
+          className={`transition-all flex flex-col ${currentTheme.classes.composerInner}`}
         >
-          {/* Slash suggestions, kept inside the composer so they scroll with it */}
-          {slash && (
-            <CannedSuggestions
-              hits={slashHits}
-              activeIndex={slashIndex}
-              onHover={setSlashIndex}
-              onPick={(template) =>
-                insertCanned(template, {
-                  start: slash.start,
-                  end: slash.start + slash.query.length + 1,
-                })
-              }
-            />
-          )}
-
-          {/* Draft translation, reviewed before anything is sent */}
-          {draftTranslation && (
-            <div className="mx-3 mt-2 rounded-xl border border-dashed border-amber-300 bg-amber-50/70 px-3 py-2 text-xs">
-              <div className="flex items-center justify-between gap-2 mb-1">
-                <span className="inline-flex items-center gap-1 text-[10px] font-medium uppercase tracking-wide text-amber-800">
-                  <Languages className="w-3 h-3" />
-                  {draftTranslation.same
-                    ? "Bản nháp đã là ngôn ngữ của khách"
-                    : `Bản dịch · ${translationLanguageLabel(draftTranslation.target)}`}
-                </span>
-                <button
-                  type="button"
-                  onClick={() => setDraftTranslation(null)}
-                  className="text-[10px] text-amber-800/70 hover:text-amber-900 cursor-pointer"
-                >
-                  Đóng
-                </button>
-              </div>
-              <p className="text-[#1D1D1F] leading-relaxed whitespace-pre-wrap [overflow-wrap:anywhere]">
-                {draftTranslation.text}
-              </p>
-              {draftTranslation.source !== draft.trim() && (
-                <p className="mt-1 text-[10px] text-amber-800">
-                  Bản nháp đã sửa sau khi dịch — bấm Dịch để cập nhật.
-                </p>
-              )}
-              {!draftTranslation.same && (
-                <div className="flex gap-2 mt-2">
-                  <button
-                    type="button"
-                    onClick={() => {
-                      // Replaces the draft and nothing more: sending is still
-                      // the agent's Enter, so a translation never leaves alone.
-                      setDraft(draftTranslation.text);
-                      setDraftTranslation(null);
-                      setSlash(null);
-                      textareaRef.current?.focus();
-                    }}
-                    className="rounded-lg bg-amber-600 hover:bg-amber-700 px-2.5 py-1 text-[11px] font-medium text-white cursor-pointer"
-                  >
-                    Dùng bản dịch
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => void navigator.clipboard?.writeText(draftTranslation.text)}
-                    className="rounded-lg border border-amber-300 px-2.5 py-1 text-[11px] font-medium text-amber-900 cursor-pointer"
-                  >
-                    Sao chép
-                  </button>
-                </div>
-              )}
-            </div>
-          )}
 
           {/* Auto-resizing Textarea */}
           <textarea
@@ -2180,16 +1902,16 @@ function ConversationThread({
             disabled={!connected}
             placeholder={
               connected
-                ? `Nhập câu trả lời theo phong cách ${currentTheme.name}… (Enter gửi, Shift+Enter xuống dòng)`
+                ? `Nhập câu trả lời… (Gõ / để chọn mẫu câu nhanh, Shift+Enter xuống dòng)`
                 : "Đang kết nối lại máy chủ…"
             }
             aria-label="Nội dung trả lời"
-            className={`w-full resize-none min-h-[68px] max-h-48 px-3.5 pt-3 pb-2 outline-none leading-relaxed text-xs sm:text-[13px] disabled:opacity-50 ${currentTheme.classes.composerTextarea}`}
+            className={`w-full resize-none min-h-[64px] max-h-48 px-3.5 pt-3 pb-2 outline-none leading-relaxed text-xs sm:text-[13px] rounded-t-[inherit] disabled:opacity-50 ${currentTheme.classes.composerTextarea}`}
           />
 
           {/* SaaS Bottom Integrated Toolbar */}
           <div
-            className={`px-3 py-2 flex items-center justify-between gap-2 relative transition-colors ${currentTheme.classes.composerToolbar}`}
+            className={`px-3 py-2 flex items-center justify-between gap-2 relative transition-colors rounded-b-[inherit] ${currentTheme.classes.composerToolbar}`}
           >
             {/* Left Quick Tools */}
             <div className="flex items-center gap-1 sm:gap-1.5 flex-wrap">
@@ -2229,7 +1951,9 @@ function ConversationThread({
                 </button>
               </div>
 
-              {/* Canned Responses Popover */}
+              <div className="h-4 w-px bg-black/10 dark:bg-white/10 mx-0.5 hidden sm:block" />
+
+              {/* Canned Responses Popover Trigger */}
               <div className="relative" ref={cannedMenuRef}>
                 <button
                   type="button"
@@ -2237,51 +1961,30 @@ function ConversationThread({
                     setShowCannedMenu(!showCannedMenu);
                     setShowEmojiPicker(false);
                   }}
-                  title="Chọn mẫu câu phản hồi nhanh"
-                  className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-medium transition cursor-pointer border select-none shadow-2xs ${
+                  title="Mẫu câu phản hồi nhanh (Gõ / trong ô chat)"
+                  className={`inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium transition cursor-pointer border select-none shadow-2xs ${
                     showCannedMenu
                       ? currentTheme.uiAccent.brandBadge
                       : currentTheme.classes.actionButton
                   }`}
                 >
                   <Sparkles className={`w-3.5 h-3.5 ${currentTheme.uiAccent.icon}`} />
-                  <span className="hidden sm:inline">Mẫu câu</span>
-                  <ChevronDown className="w-3 h-3 opacity-60" />
-                </button>
-
-                {showCannedMenu && (
-                  <CannedPickerPanel
-                    personal={personalTemplates}
-                    effective={effective}
-                    siteName={siteName}
-                    onPick={(template) => insertCanned(template)}
-                    onClose={() => setShowCannedMenu(false)}
-                    canManageSite={isProjectOwner}
-                  />
-                )}
-              </div>
-
-              {/* Translate the draft into the visitor's language */}
-              {translationEnabled && draft.trim() && (
-                <button
-                  type="button"
-                  onClick={() => void translateDraft()}
-                  disabled={translatingDraft}
-                  title={`Dịch bản nháp sang ${translationLanguageLabel(visitorLanguage)} (ngôn ngữ của khách) — chỉ hiện cho bạn xem trước`}
-                  className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-medium transition cursor-pointer border select-none shadow-2xs disabled:opacity-50 ${
-                    draftTranslation
-                      ? currentTheme.uiAccent.brandBadge
-                      : currentTheme.classes.actionButton
-                  }`}
-                >
-                  {translatingDraft ? (
-                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                  ) : (
-                    <Languages className="w-3.5 h-3.5" />
+                  <span className="font-medium">Mẫu câu</span>
+                  <span className="text-[10px] opacity-60 font-mono px-1 py-0.2 rounded bg-black/5 dark:bg-white/10">
+                    /
+                  </span>
+                  {totalCannedCount > 0 && (
+                    <span className="rounded-full bg-black/5 dark:bg-white/10 px-1 text-[10px] font-semibold opacity-75">
+                      {totalCannedCount}
+                    </span>
                   )}
-                  <span className="hidden sm:inline">Dịch</span>
+                  <ChevronDown
+                    className={`w-3 h-3 opacity-60 transition-transform duration-150 ${
+                      showCannedMenu ? "rotate-180" : ""
+                    }`}
+                  />
                 </button>
-              )}
+              </div>
 
               {/* Emoji Picker */}
               <div className="relative" ref={emojiPickerRef}>
@@ -2302,13 +2005,13 @@ function ConversationThread({
                 </button>
 
                 {showEmojiPicker && (
-                  <div className="absolute bottom-full left-0 mb-2 rounded-2xl bg-white dark:bg-[#161922] border border-neutral-200 dark:border-white/15 shadow-2xl p-2 z-30 flex items-center gap-1 animate-in fade-in zoom-in-95 duration-150">
+                  <div className="absolute bottom-full left-0 mb-2 rounded-2xl bg-white/95 dark:bg-[#161922]/95 backdrop-blur-xl border border-neutral-200/90 dark:border-white/15 shadow-2xl p-2 z-40 flex items-center gap-1 animate-in fade-in zoom-in-95 duration-150">
                     {QUICK_EMOJIS.map((emoji, idx) => (
                       <button
                         key={idx}
                         type="button"
                         onClick={() => handleInsertEmoji(emoji)}
-                        className="w-7 h-7 rounded-lg hover:bg-black/5 dark:hover:bg-white/10 flex items-center justify-center text-sm transition cursor-pointer hover:scale-110 active:scale-95"
+                        className="w-7 h-7 rounded-lg hover:bg-black/5 dark:hover:bg-white/10 flex items-center justify-center text-sm transition cursor-pointer hover:scale-115 active:scale-95"
                       >
                         {emoji}
                       </button>

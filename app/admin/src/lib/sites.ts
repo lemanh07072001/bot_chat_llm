@@ -63,8 +63,6 @@ export type Site = {
   settings: WidgetSettings;
   /** Absent for a manager, who is not sent the project's configuration. */
   officeHours?: OfficeHours;
-  /** Whether the inbox may offer machine translation for this project. */
-  translation?: { enabled: boolean };
   active: boolean;
   access: SiteAccess;
   /** Owner plus managers. Only sent on the list, not on a single read. */

@@ -6,8 +6,6 @@ export type AccountPreferences = {
   cannedResponses?: string[];
   /** Current shape: body plus an optional title and `/` shortcut. */
   cannedResponseTemplates?: CannedTemplate[];
-  /** The language this agent reads and writes in; absent means the default. */
-  translationLanguage?: string;
 };
 
 export function announcePreferences(preferences: AccountPreferences) {

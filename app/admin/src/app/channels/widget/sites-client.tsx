@@ -19,7 +19,6 @@ import {
   Copy,
   Globe,
   Key,
-  Languages,
   Lock,
   Package,
   Palette,
@@ -739,7 +738,6 @@ function ConfigTab({
   const [state, formAction, pending] = useActionState(saveSite, {});
   const formState = useSiteFormState(site);
   const hoursState = useOfficeHoursState(site);
-  const [translationEnabled, setTranslationEnabled] = useState(site.translation?.enabled ?? true);
   const [previewOutsideHours, setPreviewOutsideHours] = useState(false);
   const router = useRouter();
 
@@ -767,23 +765,6 @@ function ConfigTab({
             <span className="text-xs font-medium text-[#1D1D1F]">Giờ làm việc</span>
           </div>
           <OfficeHoursFields state={hoursState} />
-        </div>
-
-        <div>
-          <div className="flex items-center gap-1.5 mb-1.5">
-            <Languages className="w-3.5 h-3.5 text-[#86868B]" />
-            <span className="text-xs font-medium text-[#1D1D1F]">Dịch hội thoại</span>
-          </div>
-          <div className="rounded-xl border border-black/[0.06] p-3.5">
-            <input type="hidden" name="translationPresent" value="1" />
-            <CheckboxField
-              name="translationEnabled"
-              checked={translationEnabled}
-              onChange={setTranslationEnabled}
-              label="Cho phép nhân viên dịch tin nhắn của dự án này"
-              description="Nút Dịch trong hộp thư chuyển tin của khách sang ngôn ngữ nhân viên đọc. Bản dịch chỉ hiện ở phía nhân viên, không bao giờ tự gửi cho khách. Tắt ở đây khi dự án không được phép gửi nội dung ra nhà cung cấp dịch bên ngoài."
-            />
-          </div>
         </div>
 
         <FormFeedback state={state} />

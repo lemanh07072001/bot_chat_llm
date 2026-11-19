@@ -11,15 +11,10 @@ import {
   type CannedTemplate,
 } from "@/lib/canned";
 import { TemplateRows } from "@/components/canned/TemplateRows";
-import {
-  DEFAULT_TRANSLATION_LANGUAGE,
-  TRANSLATION_LANGUAGES,
-  isTranslationLanguage,
-} from "@/lib/translation";
 
 const TABS = [
   ["profile", "Thông tin"],
-  ["preferences", "Mẫu câu, dịch & âm thanh"],
+  ["preferences", "Mẫu câu & âm thanh"],
   ["password", "Mật khẩu"],
 ] as const;
 
@@ -35,7 +30,6 @@ export function AccountDialog({
   const [tab, setTab] = useState(initialTab);
   const [profile, setProfile] = useState({ name: "", jobTitle: "", avatarUrl: "" });
   const [soundEnabled, setSoundEnabled] = useState(true);
-  const [translationLanguage, setTranslationLanguage] = useState("");
   const [templates, setTemplates] = useState<CannedTemplate[]>([]);
   const [passwords, setPasswords] = useState({ currentPassword: "", newPassword: "", confirm: "" });
   const [loading, setLoading] = useState(true);
@@ -52,11 +46,6 @@ export function AccountDialog({
       if (!response.ok) throw new Error(data.error ?? "Không tải được tài khoản.");
       setProfile({ name: data.name, jobTitle: data.jobTitle ?? "", avatarUrl: data.avatarUrl ?? "" });
       setSoundEnabled(data.soundEnabled ?? true);
-      setTranslationLanguage(
-        isTranslationLanguage(data.translationLanguage ?? "")
-          ? String(data.translationLanguage)
-          : "",
-      );
       setTemplates(resolvePersonalTemplates(data));
       setLoading(false);
     }).catch((cause) => { if (!controller.signal.aborted) setError(cause.message); });
@@ -80,7 +69,7 @@ export function AccountDialog({
         : tab === "preferences"
           // The api stores the templates and derives the plain-text list from
           // them, so a client that only knows the old shape sees the same rows.
-          ? { soundEnabled, cannedResponseTemplates: cleanCannedTemplates(templates), translationLanguage }
+          ? { soundEnabled, cannedResponseTemplates: cleanCannedTemplates(templates) }
           : { currentPassword: passwords.currentPassword, newPassword: passwords.newPassword };
       const response = await fetch(`/api/account/${tab}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
       const data = await response.json();
@@ -106,23 +95,6 @@ export function AccountDialog({
       </>}
       {tab === "preferences" && <>
         <label className="flex gap-2 text-sm font-medium text-[#1D1D1F] items-center cursor-pointer"><input type="checkbox" className="accent-amber-600 rounded" checked={soundEnabled} onChange={(e) => setSoundEnabled(e.target.checked)} />Âm thanh khi có tin mới</label>
-        <label className="block text-sm font-medium text-[#1D1D1F]">
-          Ngôn ngữ tôi đọc
-          <select
-            className={fieldClass}
-            value={translationLanguage}
-            onChange={(e) => setTranslationLanguage(e.target.value)}
-          >
-            <option value="">Mặc định ({TRANSLATION_LANGUAGES.find((language) => language.code === DEFAULT_TRANSLATION_LANGUAGE)?.label})</option>
-            {TRANSLATION_LANGUAGES.map((language) => (
-              <option key={language.code} value={language.code}>{language.label}</option>
-            ))}
-          </select>
-        </label>
-        <p className="text-xs text-neutral-500">
-          Nút <strong>Dịch</strong> trong hộp thư chuyển tin của khách sang ngôn ngữ này.
-          Bản dịch chỉ hiện cho bạn, không bao giờ tự gửi cho khách.
-        </p>
         <p className="text-xs text-neutral-500">
           Mẫu câu cá nhân, lưu theo tài khoản và chỉ bạn thấy. Tối đa {CANNED_MAX_TEMPLATES} mẫu.
           Gõ <code className="rounded bg-neutral-100 px-1">/phím-tắt</code> trong ô soạn để chèn nhanh;

@@ -44,8 +44,6 @@ export type ProjectRef = {
   id: string;
   name: string;
   access: "owner" | "manager";
-  /** False when the project turned machine translation off for its threads. */
-  translation?: boolean;
 };
 
 export const INBOX_FILTERS: { key: InboxFilter; label: string }[] = [
@@ -100,14 +98,6 @@ export function matchesFilter(
 
 export type MessageSenderKind = "visitor" | "agent" | "system";
 
-/** One stored rendering of a message in another language. */
-export type MessageTranslation = {
-  lang: string;
-  text: string;
-  model?: string;
-  at?: string;
-};
-
 export type ChatMessage = {
   id: string;
   conversationId: string;
@@ -117,20 +107,7 @@ export type ChatMessage = {
   sender?: { id: string; name: string; avatarUrl: string | null; jobTitle: string | null } | null;
   body: string;
   createdAt: string;
-  /**
-   * Translations already paid for, one per language. They live on the message
-   * rather than in the panel so a reload does not translate the same line twice.
-   */
-  translations?: MessageTranslation[];
 };
-
-/** The stored translation for a language, if somebody already asked for it. */
-export function translationFor(
-  message: ChatMessage,
-  language: string,
-): MessageTranslation | undefined {
-  return message.translations?.find((translation) => translation.lang === language);
-}
 
 /** Best label we have for an anonymous visitor. */
 export function visitorLabel(conversation: Conversation): string {
