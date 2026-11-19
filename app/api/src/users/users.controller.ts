@@ -52,9 +52,6 @@ export class UsersController {
       ...(!normalized && dto.cannedResponses !== undefined
         ? legacyTemplates(dto.cannedResponses)
         : {}),
-      ...(dto.translationLanguage !== undefined
-        ? { translationLanguage: dto.translationLanguage }
-        : {}),
     });
     if (!user) throw new NotFoundException();
     return user.toJSON();

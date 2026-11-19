@@ -73,7 +73,6 @@ export class SitesController {
       allowedOrigins: dto.allowedOrigins,
       settings: dto.settings,
       officeHours: dto.officeHours,
-      translation: dto.translation,
     });
 
     return this.present(site, 'owner');

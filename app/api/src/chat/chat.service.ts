@@ -344,55 +344,6 @@ export class ChatService {
     return message;
   }
 
-  /**
-   * Stores one translation on a message, replacing an older one for the same
-   * language. Two calls for different languages both survive.
-   */
-  async saveMessageTranslation(
-    messageId: string,
-    conversationId: string,
-    entry: { lang: string; text: string; model?: string },
-  ): Promise<MessageDocument | null> {
-    if (!Types.ObjectId.isValid(messageId)) {
-      return null;
-    }
-
-    const filter = {
-      _id: new Types.ObjectId(messageId),
-      conversationId: new Types.ObjectId(conversationId),
-    };
-
-    // `$pull` then `$push`: a `$set` on the array element would need a
-    // positional match, and Mongo refuses `$push` and `$pull` on one field.
-    await this.messageModel
-      .updateOne(filter, { $pull: { translations: { lang: entry.lang } } })
-      .exec();
-
-    return this.messageModel
-      .findOneAndUpdate(
-        filter,
-        { $push: { translations: { ...entry, at: new Date() } } },
-        { returnDocument: 'after' },
-      )
-      .exec();
-  }
-
-  async findMessageById(
-    messageId: string,
-    conversationId: string,
-  ): Promise<MessageDocument | null> {
-    if (!Types.ObjectId.isValid(messageId)) {
-      return null;
-    }
-
-    return this.messageModel
-      .findOne({
-        _id: new Types.ObjectId(messageId),
-        conversationId: new Types.ObjectId(conversationId),
-      })
-      .exec();
-  }
-
   /** System notes ("closed by X") are messages, so both sides see the same thread. */
   async appendSystemMessage(
     conversationId: string,

@@ -62,15 +62,6 @@ export class User {
   @Prop({ type: [CannedTemplateSchema], default: undefined })
   cannedResponseTemplates?: CannedTemplate[];
 
-  /**
-   * The language this agent reads and writes in, e.g. `vi`.
-   *
-   * Translation is opt-in per person: an agent who has never chosen keeps the
-   * default, and a null/absent value simply means the UI offers Vietnamese.
-   */
-  @Prop({ trim: true, maxlength: 8, default: undefined })
-  translationLanguage?: string;
-
   @Prop({ required: true, unique: true, lowercase: true, trim: true })
   email!: string;
 

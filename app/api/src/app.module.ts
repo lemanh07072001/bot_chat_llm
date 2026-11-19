@@ -10,7 +10,6 @@ import { ChatModule } from './chat/chat.module.js';
 import { WidgetModule } from './widget/widget.module.js';
 import { TelegramModule } from './telegram/telegram.module.js';
 import { CannedResponsesModule } from './canned-responses/canned-responses.module.js';
-import { TranslationModule } from './translation/translation.module.js';
 
 import { RealtimeSharedModule } from './realtime/realtime-shared.module.js';
 

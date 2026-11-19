@@ -78,7 +78,7 @@ export class UsersService {
     return this.userModel.findOne({ _id: id, deletedAt: null }).exec();
   }
 
-  async updateSelf(id: string, input: { name: string; jobTitle: string; avatarUrl: string } | { soundEnabled?: boolean; cannedResponses?: string[]; cannedResponseTemplates?: CannedTemplate[]; translationLanguage?: string }) {
+  async updateSelf(id: string, input: { name: string; jobTitle: string; avatarUrl: string } | { soundEnabled?: boolean; cannedResponses?: string[]; cannedResponseTemplates?: CannedTemplate[] }) {
     return this.userModel.findByIdAndUpdate(id, { $set: input }, { returnDocument: 'after', runValidators: true }).exec();
   }
 

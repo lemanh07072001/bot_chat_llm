@@ -114,22 +114,6 @@ export class SiteCannedResponses {
 export const SiteCannedResponsesSchema =
   SchemaFactory.createForClass(SiteCannedResponses);
 
-/**
- * Whether the inbox offers machine translation for this project's threads.
- *
- * Nothing is translated automatically and nothing is ever sent to the visitor
- * on its own: the switch only decides whether the agent sees a "Dịch" button,
- * so a project whose staff all share one language is not paying for a provider.
- */
-@Schema({ _id: false })
-export class SiteTranslation {
-  @Prop({ required: true, default: true })
-  enabled!: boolean;
-}
-
-export const SiteTranslationSchema =
-  SchemaFactory.createForClass(SiteTranslation);
-
 @Schema({ timestamps: true })
 export class Site {
   @Prop({ type: Date, default: null })
@@ -160,9 +144,6 @@ export class Site {
 
   @Prop({ type: SiteCannedResponsesSchema, required: true, default: () => ({}) })
   cannedResponses!: SiteCannedResponses;
-
-  @Prop({ type: SiteTranslationSchema, required: true, default: () => ({}) })
-  translation!: SiteTranslation;
 
   @Prop({ required: true, default: true })
   active!: boolean;

@@ -6,7 +6,6 @@ import {
   OfficeHours,
   Site,
   SiteDocument,
-  SiteTranslation,
   WidgetSettings,
 } from './site.schema.js';
 import { SiteMember, SiteMemberDocument } from './site-member.schema.js';
@@ -17,7 +16,6 @@ export interface CreateSiteInput {
   allowedOrigins?: string[];
   settings?: Partial<WidgetSettings>;
   officeHours?: Partial<OfficeHours>;
-  translation?: Partial<SiteTranslation>;
 }
 
 export interface UpdateSiteInput {
@@ -25,7 +23,6 @@ export interface UpdateSiteInput {
   allowedOrigins?: string[];
   settings?: Partial<WidgetSettings>;
   officeHours?: Partial<OfficeHours>;
-  translation?: Partial<SiteTranslation>;
   active?: boolean;
 }
 
@@ -95,7 +92,6 @@ export class SitesService {
       allowedOrigins: input.allowedOrigins ?? [],
       settings: input.settings ?? {},
       officeHours: input.officeHours ?? {},
-      translation: input.translation ?? {},
     });
   }
 
@@ -197,9 +193,6 @@ export class SitesService {
     }
     if (input.officeHours !== undefined) {
       Object.assign(site.officeHours, definedOnly(input.officeHours));
-    }
-    if (input.translation !== undefined) {
-      Object.assign(site.translation, definedOnly(input.translation));
     }
 
     return site.save();

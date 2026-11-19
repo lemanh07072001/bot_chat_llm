@@ -1,9 +1,8 @@
-import {
+﻿import {
   BadRequestException,
   ConflictException,
   ForbiddenException,
   NotFoundException,
-  ServiceUnavailableException,
 } from '@nestjs/common';
 import { vi } from 'vitest';
 import { ConversationsController } from './conversations.controller.js';
@@ -12,11 +11,9 @@ import type { SitesService } from '../sites/sites.service.js';
 import type { UsersService } from '../users/users.service.js';
 import type { RealtimeBusService } from '../realtime/realtime-bus.service.js';
 import type { ConversationDocument } from './conversation.schema.js';
-import type { MessageDocument } from './message.schema.js';
 import type { SiteDocument } from '../sites/site.schema.js';
 import type { JwtPayload } from '../auth/jwt-payload.type.js';
 import type { InternalNotesService } from './internal-notes.service.js';
-import type { TranslationService } from '../translation/translation.service.js';
 
 const OWNER = '507f1f77bcf86cd799430001';
 const MANAGER = '507f1f77bcf86cd799430002';
@@ -33,7 +30,7 @@ const actor = (sub: string): JwtPayload => ({
 
 const site = {
   _id: SITE_ID,
-  name: 'Website bán hàng',
+  name: 'Website bÃ¡n hÃ ng',
   ownerId: OWNER,
 } as unknown as SiteDocument;
 
@@ -67,8 +64,6 @@ describe('ConversationsController', () => {
     assignConversation: vi.fn(),
     setConversationStatus: vi.fn(),
     appendSystemMessage: vi.fn(),
-    findMessageById: vi.fn(),
-    saveMessageTranslation: vi.fn(),
   };
   const sites = {
     listAccessible: vi.fn(),
@@ -79,7 +74,6 @@ describe('ConversationsController', () => {
   const users = { findById: vi.fn(), findManyByIds: vi.fn() };
   const bus = { emitToSite: vi.fn(), emitToConversation: vi.fn() };
   const notes = { list: vi.fn(), create: vi.fn() };
-  const translation = { translate: vi.fn(), status: vi.fn() };
 
   const controller = new ConversationsController(
     chat as unknown as ChatService,
@@ -87,7 +81,6 @@ describe('ConversationsController', () => {
     users as unknown as UsersService,
     bus as unknown as RealtimeBusService,
     notes as unknown as InternalNotesService,
-    translation as unknown as TranslationService,
   );
 
   beforeEach(() => {
@@ -218,11 +211,11 @@ describe('ConversationsController', () => {
       );
       // The conditional update found nothing, meaning somebody got there first.
       chat.assignConversation.mockResolvedValue(null);
-      users.findById.mockResolvedValue({ name: 'Nguyễn An' });
+      users.findById.mockResolvedValue({ name: 'Nguyá»…n An' });
 
       await expect(
         controller.claim(actor(MANAGER), CONVERSATION_ID),
-      ).rejects.toThrow(/Nguyễn An/);
+      ).rejects.toThrow(/Nguyá»…n An/);
       await expect(
         controller.claim(actor(MANAGER), CONVERSATION_ID),
       ).rejects.toBeInstanceOf(ConflictException);
@@ -316,117 +309,20 @@ describe('ConversationsController', () => {
     });
   });
 
-  describe('translating', () => {
-    const MESSAGE_ID = '507f1f77bcf86cd799434001';
-
-    function messageDoc(body = 'Xin chào') {
-      return {
-        body,
-        toJSON: () => ({ id: MESSAGE_ID, body }),
-      } as unknown as MessageDocument;
-    }
-
-    it('keeps the result on the message and tells the project', async () => {
-      sites.accessForSite.mockResolvedValue('manager');
-      chat.findMessageById.mockResolvedValue(messageDoc());
-      translation.translate.mockResolvedValue({
-        text: 'Hello',
-        source: 'vi',
-        target: 'en',
-        same: false,
-        cached: false,
-      });
-      translation.status.mockReturnValue({ enabled: true, model: 'mock-model' });
-      chat.saveMessageTranslation.mockResolvedValue({
-        toJSON: () => ({
-          id: MESSAGE_ID,
-          translations: [{ lang: 'en', text: 'Hello', model: 'mock-model' }],
-        }),
-      } as unknown as MessageDocument);
-
-      await controller.translateMessage(
-        actor(MANAGER),
-        CONVERSATION_ID,
-        MESSAGE_ID,
-        { target: 'en' },
-      );
-
-      expect(translation.translate).toHaveBeenCalledWith({
-        text: 'Xin chào',
-        target: 'en',
-      });
-      expect(chat.saveMessageTranslation).toHaveBeenCalledWith(
-        MESSAGE_ID,
-        CONVERSATION_ID,
-        { lang: 'en', text: 'Hello', model: 'mock-model' },
-      );
-      // The site room, never the conversation room: visitors are in the latter
-      // and must not receive the agent's language.
-      expect(bus.emitToSite).toHaveBeenCalledWith(
-        SITE_ID,
-        'message:updated',
-        expect.anything(),
-      );
-      expect(bus.emitToConversation).not.toHaveBeenCalled();
-    });
-
-    it('refuses when the project turned translation off', async () => {
-      const disabledSite = {
-        ...site,
-        translation: { enabled: false },
-      } as unknown as SiteDocument;
-      chat.findConversationById.mockResolvedValue(conversation());
-      sites.findById.mockResolvedValue(disabledSite);
-      sites.accessForSite.mockResolvedValue('manager');
-
-      await expect(
-        controller.translateMessage(actor(MANAGER), CONVERSATION_ID, MESSAGE_ID, {
-          target: 'en',
-        }),
-      ).rejects.toBeInstanceOf(ServiceUnavailableException);
-
-      expect(translation.translate).not.toHaveBeenCalled();
-      expect(chat.saveMessageTranslation).not.toHaveBeenCalled();
-    });
-
-    it('does not store the original when it already reads in that language', async () => {
-      sites.accessForSite.mockResolvedValue('manager');
-      chat.findMessageById.mockResolvedValue(messageDoc('Khách hỏi giá'));
-      translation.translate.mockResolvedValue({
-        text: 'Khách hỏi giá',
-        source: 'vi',
-        target: 'vi',
-        same: true,
-        cached: false,
-      });
-
-      const result = await controller.translateMessage(
-        actor(MANAGER),
-        CONVERSATION_ID,
-        MESSAGE_ID,
-        { target: 'vi' },
-      );
-
-      expect(result.translation?.same).toBe(true);
-      expect(chat.saveMessageTranslation).not.toHaveBeenCalled();
-      expect(bus.emitToSite).not.toHaveBeenCalled();
-    });
-  });
-
   describe('closing', () => {
     it('writes a system note the visitor also sees', async () => {
       sites.accessForSite.mockResolvedValue('manager');
       chat.setConversationStatus.mockResolvedValue(
         conversation({ status: 'closed' }),
       );
-      users.findById.mockResolvedValue({ name: 'Trần Bình' });
+      users.findById.mockResolvedValue({ name: 'Tráº§n BÃ¬nh' });
       chat.appendSystemMessage.mockResolvedValue({
         toJSON: () => ({ id: 'm1' }),
       });
 
       await controller.close(actor(MANAGER), CONVERSATION_ID);
 
-      expect(chat.appendSystemMessage.mock.calls[0][2]).toContain('Trần Bình');
+      expect(chat.appendSystemMessage.mock.calls[0][2]).toContain('Tráº§n BÃ¬nh');
       expect(bus.emitToConversation).toHaveBeenCalledWith(
         CONVERSATION_ID,
         'message:new',

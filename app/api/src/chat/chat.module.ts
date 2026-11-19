@@ -9,13 +9,11 @@ import { SitesModule } from '../sites/sites.module.js';
 import { UsersModule } from '../users/users.module.js';
 import { InternalNote, InternalNoteSchema } from './internal-note.schema.js';
 import { InternalNotesService } from './internal-notes.service.js';
-import { TranslationModule } from '../translation/translation.module.js';
 
 @Module({
   imports: [
     SitesModule,
     UsersModule,
-    TranslationModule,
     MongooseModule.forFeature([
       { name: Visitor.name, schema: VisitorSchema },
       { name: Conversation.name, schema: ConversationSchema },
