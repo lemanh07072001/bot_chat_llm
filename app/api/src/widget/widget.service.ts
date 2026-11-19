@@ -36,6 +36,8 @@ export interface WidgetSessionResult {
   visitorToken: string;
   realtimeUrl: string;
   visitorKey: string;
+  /** This visitor's own id; the widget needs it to mark its own reactions. */
+  visitorId: string;
   conversationId: string;
   settings: WidgetSettings;
   availability: WidgetAvailability;
@@ -140,6 +142,7 @@ export class WidgetService {
       }),
       realtimeUrl: this.config.get<string>('PUBLIC_REALTIME_URL') || 'http://localhost:3003',
       visitorKey: visitor.visitorKey,
+      visitorId: String(visitor._id),
       conversationId,
       settings: site.settings,
       availability: {

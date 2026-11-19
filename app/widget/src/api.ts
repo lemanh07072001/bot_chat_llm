@@ -39,27 +39,43 @@ export async function fetchOlderMessages(
   apiUrl: string,
   visitorToken: string,
   before: string,
-): Promise<{
+): Promise<WidgetMessagePage> {
+  return loadMessages(apiUrl, visitorToken, before);
+}
+
+/**
+ * The newest page. Used after a reconnect, where events that arrived while the
+ * socket was down were never delivered.
+ */
+export async function fetchRecentMessages(
+  apiUrl: string,
+  visitorToken: string,
+): Promise<WidgetMessagePage> {
+  return loadMessages(apiUrl, visitorToken, null);
+}
+
+export interface WidgetMessagePage {
   messages: ChatMessage[];
   agents: AgentProfile[];
   hasMore: boolean;
   nextCursor: string | null;
-}> {
-  const response = await fetch(
-    `${trimTrailingSlash(apiUrl)}/widget/messages?before=${encodeURIComponent(before)}`,
-    { headers: { Authorization: `Bearer ${visitorToken}` } },
-  );
+}
+
+async function loadMessages(
+  apiUrl: string,
+  visitorToken: string,
+  before: string | null,
+): Promise<WidgetMessagePage> {
+  const query = before ? `?before=${encodeURIComponent(before)}` : '';
+  const response = await fetch(`${trimTrailingSlash(apiUrl)}/widget/messages${query}`, {
+    headers: { Authorization: `Bearer ${visitorToken}` },
+  });
 
   if (!response.ok) {
     throw new Error(`Loading history failed (${response.status})`);
   }
 
-  return (await response.json()) as {
-    messages: ChatMessage[];
-    agents: AgentProfile[];
-    hasMore: boolean;
-    nextCursor: string | null;
-  };
+  return (await response.json()) as WidgetMessagePage;
 }
 
 /** Stores a name and email so an out-of-hours chat can be answered later. */

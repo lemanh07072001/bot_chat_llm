@@ -98,6 +98,14 @@ export function matchesFilter(
 
 export type MessageSenderKind = "visitor" | "agent" | "system";
 
+export type MessageReaction = {
+  emoji: string;
+  /** Who left it, so the same payload serves every viewer. */
+  kind: "visitor" | "agent";
+  /** Visitor or user id. */
+  id: string;
+};
+
 export type ChatMessage = {
   id: string;
   conversationId: string;
@@ -106,8 +114,35 @@ export type ChatMessage = {
   senderName?: string;
   sender?: { id: string; name: string; avatarUrl: string | null; jobTitle: string | null } | null;
   body: string;
+  reactions?: MessageReaction[];
   createdAt: string;
 };
+
+/**
+ * Collapses the stored list into one badge per emoji, in first-seen order, and
+ * reports which emoji the viewer picked so the badge can be highlighted.
+ */
+export function summarizeReactions(
+  reactions: MessageReaction[] | undefined,
+  viewerId: string | null,
+): { badges: Array<{ emoji: string; count: number; mine: boolean }>; mine: string | null } {
+  const byEmoji = new Map<string, { emoji: string; count: number; mine: boolean }>();
+  let mine: string | null = null;
+
+  for (const reaction of reactions ?? []) {
+    const entry = byEmoji.get(reaction.emoji) ?? { emoji: reaction.emoji, count: 0, mine: false };
+    entry.count += 1;
+
+    if (viewerId && reaction.kind === "agent" && reaction.id === viewerId) {
+      entry.mine = true;
+      mine = reaction.emoji;
+    }
+
+    byEmoji.set(reaction.emoji, entry);
+  }
+
+  return { badges: [...byEmoji.values()], mine };
+}
 
 /** Best label we have for an anonymous visitor. */
 export function visitorLabel(conversation: Conversation): string {

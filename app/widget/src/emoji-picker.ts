@@ -577,10 +577,10 @@ export class EmojiPicker {
     }
 
     if (!this.data) {
-      const loading = document.createElement('p');
-      loading.className = 'emoji-empty';
-      loading.textContent = LABELS.loading;
-      this.gridWrap.append(loading);
+      // A silent skeleton instead of a "loading" line: the panel is already the
+      // right shape, so it reads as already-open rather than as a reload. The
+      // text is kept for screen readers only.
+      this.gridWrap.append(this.buildSkeleton());
       // Nothing to observe yet, but any sections from a previous render are gone.
       this.observeSections();
       return;
@@ -602,6 +602,35 @@ export class EmojiPicker {
     }
 
     this.observeSections();
+  }
+
+  /**
+   * Placeholders with the exact geometry of the real grid, so the panel never
+   * changes height when the dataset arrives (that jump is what made reopening
+   * feel like a reload).
+   */
+  private buildSkeleton(): HTMLDivElement {
+    const wrap = document.createElement('div');
+    wrap.className = 'emoji-skeleton';
+    wrap.setAttribute('role', 'status');
+    wrap.setAttribute('aria-label', LABELS.loading);
+
+    const grid = document.createElement('div');
+    grid.className = 'emoji-grid';
+
+    const fragment = document.createDocumentFragment();
+
+    for (let index = 0; index < COLUMNS * 6; index++) {
+      const cell = document.createElement('span');
+      cell.className = 'emoji-skeleton-cell';
+      cell.setAttribute('aria-hidden', 'true');
+      fragment.append(cell);
+    }
+
+    grid.append(fragment);
+    wrap.append(grid);
+
+    return wrap;
   }
 
   private buildRecentSection(): HTMLDivElement {

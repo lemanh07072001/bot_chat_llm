@@ -1,5 +1,6 @@
 import { io, type Socket } from 'socket.io-client';
-import { createSession, fetchOlderMessages, saveContact, fetchAvailability } from './api.js';
+import { createSession, fetchOlderMessages, fetchRecentMessages, saveContact, fetchAvailability } from './api.js';
+import type { WidgetMessagePage } from './api.js';
 import { registerEmojiFont, resolveAssetBase } from './emoji-assets.js';
 import { EmojiPicker } from './emoji-picker.js';
 import { STYLES } from './styles.js';
@@ -8,6 +9,7 @@ import type {
   ChatMessage,
   ChatWidgetInstance,
   ChatWidgetOptions,
+  MessageReaction,
   WidgetAvailability,
   WidgetSession,
 } from './types.js';
@@ -35,7 +37,23 @@ const LABELS = {
   agentTyping: 'Đang trả lời…',
   defaultTitle: 'Chat',
   failed: 'Không kết nối được dịch vụ chat. Vui lòng thử lại.',
+  react: 'Thả cảm xúc',
+  reactMine: 'Bạn đã thả cảm xúc này',
 };
+
+/**
+ * The bar that opens on a message. Deliberately short: these are the six the
+ * widget's own font covers completely, and it keeps the tap targets reachable
+ * on a phone.
+ */
+const QUICK_REACTIONS = ['👍', '❤️', '😂', '😮', '😢', '🙏'];
+
+/**
+ * How many pages a reconnect reads while closing a gap. Each page is 30
+ * messages, so this only matters after a very long drop; the walk stops at the
+ * first page that overlaps what is on screen, or at the start of the thread.
+ */
+const RESYNC_MAX_PAGES = 20;
 
 /** The only two url shapes an avatar or a logo may take. */
 const SAFE_IMAGE_URL = /^(https?:\/\/|data:image\/(png|jpeg|webp);base64,)/;
@@ -128,6 +146,18 @@ export class ChatWidget implements ChatWidgetInstance {
    * sets it, so it is captured on every interaction that can move it.
    */
   private draftSelection: { start: number; end: number } | null = null;
+  /** The row whose reaction bar is open, so an outside press can close it. */
+  private reactingRow: HTMLElement | null = null;
+  /** Latest server state per message, so a click never acts on a stale render. */
+  private readonly reactionsByMessage = new Map<string, MessageReaction[]>();
+  /** False until the first handshake, so a reconnect can be told apart. */
+  private hasHandshaked = false;
+  /** True while the newest page is being re-read after a reconnect. */
+  private resyncing = false;
+  /** A second reconnect landed mid-resync, so one more pass is owed. */
+  private resyncPending = false;
+  /** Reactions that arrived mid-resync, replayed after the snapshot is applied. */
+  private readonly bufferedReactions = new Map<string, MessageReaction[]>();
 
   private readonly options: ChatWidgetOptions;
 
@@ -405,6 +435,7 @@ export class ChatWidget implements ChatWidgetInstance {
     this.isOpen = false;
     this.panel.classList.remove('open');
     this.launcher.setAttribute('aria-expanded', 'false');
+    this.closeReactionBar();
     this.closeEmojiPicker();
     this.launcher.focus();
   }
@@ -420,6 +451,8 @@ export class ChatWidget implements ChatWidgetInstance {
     // Before the host is detached: the picker drops its document listener.
     this.picker?.destroy();
     this.picker = null;
+    this.closeReactionBar();
+    this.reactionsByMessage.clear();
     this.host.remove();
   }
 
@@ -575,6 +608,8 @@ export class ChatWidget implements ChatWidgetInstance {
   }
 
   private renderHistory(messages: ChatMessage[]): void {
+    this.closeReactionBar();
+    this.reactionsByMessage.clear();
     this.body.replaceChildren();
     this.loadOlderWrap.classList.toggle('visible', this.hasOlder);
 
@@ -600,6 +635,8 @@ export class ChatWidget implements ChatWidgetInstance {
     this.socket = socket;
 
     socket.on('ready', (payload: { agentsOnline?: boolean }) => {
+      const reconnected = this.hasHandshaked;
+      this.hasHandshaked = true;
       this.connected = true;
       this.hideError();
       // The handshake carries presence as it is right now, which is fresher
@@ -610,6 +647,13 @@ export class ChatWidget implements ChatWidgetInstance {
         this.refreshStatus();
       }
       this.setComposerEnabled(true);
+
+      // Events sent while the socket was down were never delivered, and both
+      // messages and reactions are stored, so the newest page is the cheapest
+      // way to agree with the server again.
+      if (reconnected) {
+        void this.resyncThread();
+      }
     });
 
     // Sent when a member of staff picks the thread up or lets it go, so the
@@ -671,6 +715,129 @@ export class ChatWidget implements ChatWidgetInstance {
         this.setAgentTyping(payload.isTyping);
       }
     });
+
+    // Reactions can arrive from an agent while the visitor is reading, so the
+    // badges are repainted from the same payload the ack carries.
+    socket.on(
+      'message:reactions',
+      (payload: { messageId?: string; conversationId?: string; reactions?: MessageReaction[] }) => {
+        if (
+          !payload ||
+          typeof payload.messageId !== 'string' ||
+          payload.conversationId !== this.session?.conversationId
+        ) {
+          return;
+        }
+
+        this.applyReactions(
+          payload.messageId,
+          Array.isArray(payload.reactions) ? payload.reactions : [],
+        );
+      },
+    );
+  }
+
+  /**
+   * Re-reads the persisted thread after a reconnect and folds it into what is
+   * on screen: missed messages are slotted into their place, and a message that
+   * is already shown gets the server's current reaction list. Anything the
+   * visitor typed in the meantime is kept.
+   */
+  private async resyncThread(): Promise<void> {
+    if (!this.session) {
+      return;
+    }
+
+    // A drop that happens while a pass is in flight must not be skipped: the
+    // snapshot being read started before that drop, so it cannot contain what
+    // arrived during it. Ask for one more pass instead.
+    if (this.resyncing) {
+      this.resyncPending = true;
+      return;
+    }
+
+    this.resyncing = true;
+
+    try {
+      do {
+        this.resyncPending = false;
+        await this.resyncOnce();
+      } while (this.resyncPending && this.connected && !this.destroyed);
+    } finally {
+      this.resyncing = false;
+    }
+  }
+
+  /** One read of the persisted thread, folded into what is on screen. */
+  private async resyncOnce(): Promise<void> {
+    const session = this.session;
+
+    if (!session) {
+      return;
+    }
+
+    const body = this.body;
+    const wasAtBottom = body.scrollHeight - body.scrollTop - body.clientHeight < 40;
+    const known = new Set(
+      [...body.querySelectorAll<HTMLElement>('[data-message-id]')].map(
+        (row) => row.dataset.messageId ?? '',
+      ),
+    );
+    const loaded: ChatMessage[] = [];
+
+    try {
+      let before: string | null = null;
+
+      // Walk back until a page overlaps what is already on screen, so a gap
+      // larger than one page is filled rather than truncated. Past the page cap
+      // the deepest part of the hole is left unread, which the history cursor
+      // still covers.
+      for (let page = 0; page < RESYNC_MAX_PAGES; page += 1) {
+        const result: WidgetMessagePage = before
+          ? await fetchOlderMessages(this.options.apiUrl, session.visitorToken, before)
+          : await fetchRecentMessages(this.options.apiUrl, session.visitorToken);
+
+        this.rememberAgents(result.agents);
+        loaded.push(...result.messages);
+
+        if (result.messages.some((message) => known.has(message.id))) break;
+
+        if (!result.hasMore || !result.nextCursor || result.nextCursor === before) break;
+
+        before = result.nextCursor;
+      }
+    } catch {
+      // The next reconnect tries again; an extra error over a chat that already
+      // works offline would be noise.
+    }
+
+    if (this.destroyed) {
+      this.bufferedReactions.clear();
+      return;
+    }
+
+    for (const message of loaded) {
+      if (known.has(message.id)) {
+        this.renderReactionsFor(message.id, message.reactions ?? []);
+      } else {
+        this.insertMessage(message);
+      }
+    }
+
+    // Whatever was seen live is newer than the fetched page, so it is replayed
+    // last — and never dropped, even when the fetch itself failed.
+    for (const [messageId, reactions] of this.bufferedReactions) {
+      this.renderReactionsFor(messageId, reactions);
+    }
+
+    this.bufferedReactions.clear();
+    this.groupAgentRows();
+
+    // A visitor reading old messages should not be yanked to the bottom, and a
+    // visitor at the bottom should see what just arrived.
+    if (this.connected && wasAtBottom) {
+      this.scrollToBottom();
+    }
   }
 
   /**
@@ -876,6 +1043,35 @@ export class ChatWidget implements ChatWidgetInstance {
   }
 
   /**
+   * Puts a message read back from the server in its place, which after a
+   * reconnect can be anywhere in the thread rather than at the end.
+   */
+  private insertMessage(message: ChatMessage): void {
+    const rows = [...this.body.querySelectorAll<HTMLElement>('[data-message-id]')];
+
+    if (rows.some((row) => row.dataset.messageId === message.id)) {
+      return;
+    }
+
+    const after = rows.find(
+      (row) =>
+        (row.dataset.createdAt ?? '') > message.createdAt ||
+        (row.dataset.createdAt === message.createdAt &&
+          (row.dataset.messageId ?? '') > message.id),
+    );
+
+    const row = this.buildRow(message);
+
+    if (after) {
+      after.before(row);
+    } else {
+      this.body.append(row);
+    }
+
+    this.groupAgentRows();
+  }
+
+  /**
    * A row for a stored message. It carries the timestamp, which is how paging
    * backwards knows where the thread currently starts; system notices written
    * by the widget itself have none and are skipped by that lookup.
@@ -897,7 +1093,253 @@ export class ChatWidget implements ChatWidgetInstance {
       row.dataset.senderId = message.senderId;
     }
 
+    // System notices ("đã đóng hội thoại") are not a person's words; a reaction
+    // on them would have nowhere to show.
+    if (message.senderKind !== 'system') {
+      this.attachReactions(row, message.reactions ?? []);
+    }
+
     return row;
+  }
+
+  /**
+   * Adds the badge line and the picker bar under a message.
+   *
+   * The bar is a plain child of the row rather than a floating popover: the
+   * message list clips its children, so anything positioned above a bubble
+   * would be cut off on the first visible row.
+   */
+  private attachReactions(row: HTMLDivElement, reactions: MessageReaction[]): void {
+    row.classList.add('reactable');
+
+    const extra = document.createElement('div');
+    extra.className = 'row-extra';
+
+    const badges = document.createElement('div');
+    badges.className = 'reactions';
+
+    const trigger = document.createElement('button');
+    trigger.type = 'button';
+    trigger.className = 'react-trigger';
+    trigger.setAttribute('aria-label', LABELS.react);
+    trigger.setAttribute('aria-expanded', 'false');
+    trigger.innerHTML = ICONS.smile;
+    trigger.addEventListener('click', () => this.toggleReactionBar(row));
+
+    const bar = document.createElement('div');
+    bar.className = 'react-bar';
+    bar.setAttribute('role', 'group');
+    bar.setAttribute('aria-label', LABELS.react);
+
+    for (const emoji of QUICK_REACTIONS) {
+      const choice = document.createElement('button');
+      choice.type = 'button';
+      choice.className = 'react-choice';
+      choice.textContent = emoji;
+      choice.title = `${LABELS.react} ${emoji}`;
+      choice.addEventListener('click', () => {
+        const messageId = row.dataset.messageId ?? '';
+        const mine = this.myReaction(this.reactionsByMessage.get(messageId) ?? []);
+        this.closeReactionBar();
+        this.focusTrigger(row);
+        void this.sendReaction(messageId, mine === emoji ? '' : emoji);
+      });
+      bar.append(choice);
+    }
+
+    badges.append(trigger);
+    extra.append(badges, bar);
+    row.append(extra);
+
+    this.renderReactions(row, reactions);
+  }
+
+  /** Renders the badge line, keeping the trigger last so it never jumps around. */
+  private renderReactions(row: HTMLElement, reactions: MessageReaction[]): void {
+    const badges = row.querySelector<HTMLDivElement>('.reactions');
+
+    if (!badges) {
+      return;
+    }
+
+    const trigger = badges.querySelector('.react-trigger');
+
+    if (row.dataset.messageId) {
+      this.reactionsByMessage.set(row.dataset.messageId, reactions);
+    }
+
+    // Grouped in first-seen order: the set is tiny, and an order that changes
+    // as counts change would make the badges hop under the pointer.
+    const totals = new Map<string, { count: number; mine: boolean }>();
+
+    for (const reaction of reactions) {
+      const entry = totals.get(reaction.emoji) ?? { count: 0, mine: false };
+      entry.count += 1;
+
+      if (reaction.kind === 'visitor' && reaction.id === this.session?.visitorId) {
+        entry.mine = true;
+      }
+
+      totals.set(reaction.emoji, entry);
+    }
+
+    // A repaint must not drop the keyboard user out of the thread, and the badge
+    // they were on may have just been removed. Read before the old nodes go, and
+    // only when the focus is inside this row's badge line.
+    const active = this.root.activeElement;
+    const focusedEmoji =
+      active instanceof HTMLElement &&
+      badges.contains(active) &&
+      active.classList.contains('reaction-badge')
+        ? (active.dataset.emoji ?? null)
+        : null;
+
+    for (const badge of [...badges.querySelectorAll('.reaction-badge')]) {
+      badge.remove();
+    }
+
+    for (const [emoji, entry] of totals) {
+      const badge = document.createElement('button');
+      badge.type = 'button';
+      badge.className = entry.mine ? 'reaction-badge mine' : 'reaction-badge';
+      badge.dataset.emoji = emoji;
+      badge.title = entry.mine ? LABELS.reactMine : LABELS.react;
+      badge.setAttribute('aria-label', `${emoji} ${entry.count}`);
+      badge.setAttribute('aria-pressed', String(entry.mine));
+
+      const glyph = document.createElement('span');
+      glyph.className = 'reaction-glyph';
+      glyph.textContent = emoji;
+
+      const count = document.createElement('span');
+      count.className = 'reaction-count';
+      count.textContent = String(entry.count);
+
+      badge.append(glyph, count);
+      badge.addEventListener('click', () => {
+        const messageId = row.dataset.messageId ?? '';
+        const current = this.myReaction(this.reactionsByMessage.get(messageId) ?? []);
+        this.closeReactionBar();
+        void this.sendReaction(messageId, current === emoji ? '' : emoji);
+      });
+
+      badges.insertBefore(badge, trigger);
+    }
+
+    row.classList.toggle('has-reactions', totals.size > 0);
+
+    if (focusedEmoji !== null) {
+      const replacement = badges.querySelector<HTMLElement>(
+        `.reaction-badge[data-emoji="${CSS.escape(focusedEmoji)}"]`,
+      );
+
+      if (replacement) {
+        replacement.focus({ preventScroll: true });
+      } else {
+        this.focusTrigger(row);
+      }
+    }
+  }
+
+  /** The reaction belonging to this visitor, if any. */
+  private myReaction(reactions: MessageReaction[]): string | null {
+    const visitorId = this.session?.visitorId;
+
+    if (!visitorId) {
+      return null;
+    }
+
+    return (
+      reactions.find((reaction) => reaction.kind === 'visitor' && reaction.id === visitorId)
+        ?.emoji ?? null
+    );
+  }
+
+  private toggleReactionBar(row: HTMLDivElement): void {
+    if (this.reactingRow === row) {
+      this.closeReactionBar();
+      return;
+    }
+
+    this.closeReactionBar();
+    row.classList.add('react-open');
+    row.querySelector('.react-trigger')?.setAttribute('aria-expanded', 'true');
+    this.reactingRow = row;
+    // Captured on the document so a press anywhere — including the host page —
+    // dismisses the bar; the shadow boundary hides it from bubbling listeners.
+    document.addEventListener('pointerdown', this.onReactionPointerDown, true);
+  }
+
+  private closeReactionBar(): void {
+    if (this.reactingRow) {
+      this.reactingRow.classList.remove('react-open');
+      this.reactingRow.querySelector('.react-trigger')?.setAttribute('aria-expanded', 'false');
+    }
+
+    this.reactingRow = null;
+    document.removeEventListener('pointerdown', this.onReactionPointerDown, true);
+  }
+
+  /**
+   * Picking from the bar hides the button that had focus, so keyboard users
+   * would otherwise be dropped back at the top of the document.
+   */
+  private focusTrigger(row: HTMLElement): void {
+    row.querySelector<HTMLButtonElement>('.react-trigger')?.focus({ preventScroll: true });
+  }
+
+  private readonly onReactionPointerDown = (event: PointerEvent): void => {
+    const path = event.composedPath();
+
+    if (this.reactingRow && path.includes(this.reactingRow)) {
+      return;
+    }
+
+    this.closeReactionBar();
+  };
+
+  /**
+   * Sends the reaction and repaints from the ack. There is no optimistic update:
+   * the write is one round trip, and painting before the server agrees would
+   * leave a badge that silently disappears when the ack fails.
+   */
+  private async sendReaction(messageId: string, emoji: string): Promise<void> {
+    const socket = this.socket;
+
+    if (!socket || !this.connected || !messageId) {
+      return;
+    }
+
+    const ack = (await socket
+      .timeout(8000)
+      .emitWithAck('message:react', { messageId, emoji })
+      .catch(() => null)) as { ok?: boolean; reactions?: MessageReaction[] } | null;
+
+    if (!ack?.ok || !Array.isArray(ack.reactions)) {
+      return;
+    }
+
+    this.applyReactions(messageId, ack.reactions);
+  }
+
+  private applyReactions(messageId: string, reactions: MessageReaction[]): void {
+    if (this.resyncing) {
+      this.bufferedReactions.set(messageId, reactions);
+      return;
+    }
+
+    this.renderReactionsFor(messageId, reactions);
+  }
+
+  /** Paints the badges of one row, without the resync buffering. */
+  private renderReactionsFor(messageId: string, reactions: MessageReaction[]): void {
+    const row = [...this.body.querySelectorAll<HTMLElement>('[data-message-id]')].find(
+      (candidate) => candidate.dataset.messageId === messageId,
+    );
+
+    if (row) {
+      this.renderReactions(row, reactions);
+    }
   }
 
   private appendRow(kind: string, body: string, senderName?: string): void {

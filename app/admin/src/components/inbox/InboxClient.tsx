@@ -49,9 +49,16 @@ import type {
   Conversation,
   ConversationCounts,
   InboxFilter,
+  MessageReaction,
   ProjectRef,
 } from "@/lib/chat";
-import { INBOX_FILTERS, filterToQuery, matchesFilter, visitorLabel } from "@/lib/chat";
+import {
+  INBOX_FILTERS,
+  filterToQuery,
+  matchesFilter,
+  summarizeReactions,
+  visitorLabel,
+} from "@/lib/chat";
 import { InternalNotes } from "./InternalNotes";
 import { type AccountPreferences } from "./preferences";
 import { getChatTheme, type ChatTheme } from "./chatThemes";
@@ -1078,9 +1085,6 @@ function ConversationThread({
     rect: { left: number; top: number; bottom: number; width: number };
   } | null>(null);
   const [copiedId, setCopiedId] = useState<string | null>(null);
-  const [reactions, setReactions] = useState<Record<string, Record<string, number>>>({});
-  /** Which emoji this agent picked per message, so a second tap undoes it. */
-  const [myReactions, setMyReactions] = useState<Record<string, string>>({});
 
   const cannedMenuRef = useRef<HTMLDivElement | null>(null);
   const cannedPanelRef = useRef<HTMLDivElement | null>(null);
@@ -1097,6 +1101,15 @@ function ConversationThread({
   const stickToBottom = useRef(true);
   const messagesRef = useRef(messages);
   useEffect(() => { messagesRef.current = messages; }, [messages]);
+  /**
+   * True while history is being re-read after a reconnect. A reaction that
+   * arrives meanwhile is newer than the page being fetched, so it is held back
+   * and replayed once that page has been merged.
+   */
+  const recovering = useRef(false);
+  const bufferedReactions = useRef(new Map<string, MessageReaction[]>());
+  /** Identifies the current recovery pass, so a stale one cannot end it. */
+  const recoverRun = useRef(0);
 
   const conversationId = conversation.id;
   const closed = conversation.status === "closed";
@@ -1213,13 +1226,27 @@ function ConversationThread({
       }
     };
 
+    const onReactions = (payload: {
+      messageId?: string;
+      conversationId?: string;
+      reactions?: MessageReaction[];
+    }) => {
+      if (!payload || payload.conversationId !== conversationId || typeof payload.messageId !== "string") {
+        return;
+      }
+
+      applyMessageReactions(payload.messageId, Array.isArray(payload.reactions) ? payload.reactions : []);
+    };
+
     socket.on("message:new", onMessage);
+    socket.on("message:reactions", onReactions);
     socket.on("typing", onTyping);
     socket.on("ready", join);
     join();
 
     return () => {
       socket.off("message:new", onMessage);
+      socket.off("message:reactions", onReactions);
       socket.off("typing", onTyping);
       socket.off("ready", join);
       socket.emit("conversation:leave", { conversationId });
@@ -1232,6 +1259,10 @@ function ConversationThread({
     if (!connected) return;
     const controller = new AbortController();
     const known = new Set(messagesRef.current.map((message) => message.id));
+    // A reconnect can start a new pass before the previous one is done. Only the
+    // newest pass may close recovery, or it would be switched off under itself.
+    const run = ++recoverRun.current;
+    recovering.current = true;
     async function recoverHistory() {
       let before: string | null = null;
       const recovered: ChatMessage[] = [];
@@ -1245,13 +1276,42 @@ function ConversationThread({
           before = page.nextCursor;
         } while (!controller.signal.aborted);
         if (controller.signal.aborted) return;
+        // Take the buffer and leave recovery mode before touching state: from
+        // here on, anything that arrives applies straight to the messages, and
+        // React replays those updaters after this merge.
+        const owns = recoverRun.current === run;
+        const newer = new Map(bufferedReactions.current);
+        if (owns) {
+          bufferedReactions.current.clear();
+          recovering.current = false;
+        }
         setMessages((previous) => {
           const merged = new Map(previous.map((message) => [message.id, message]));
           recovered.forEach((message) => merged.set(message.id, message));
+          // A reaction seen during the fetch is newer than the page, so it wins.
+          newer.forEach((reactions, messageId) => {
+            const message = merged.get(messageId);
+            if (message) merged.set(messageId, { ...message, reactions });
+          });
           return [...merged.values()].sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id));
         });
       } catch {
-        if (!controller.signal.aborted) onError("Không tải bù được tin nhắn sau kết nối lại. Hãy tải lại hội thoại.");
+        if (controller.signal.aborted) return;
+        // The snapshot is lost, but what was seen live is still good.
+        const owns = recoverRun.current === run;
+        const newer = new Map(bufferedReactions.current);
+        if (owns) {
+          bufferedReactions.current.clear();
+          recovering.current = false;
+        }
+        onError("Không tải bù được tin nhắn sau kết nối lại. Hãy tải lại hội thoại.");
+        if (newer.size > 0) {
+          setMessages((previous) =>
+            previous.map((message) =>
+              newer.has(message.id) ? { ...message, reactions: newer.get(message.id) ?? message.reactions } : message,
+            ),
+          );
+        }
       }
     }
     void recoverHistory();
@@ -1436,38 +1496,47 @@ function ConversationThread({
   /**
    * Like Facebook: one reaction per message per agent. Picking a different
    * emoji swaps it, picking the same one takes it back.
+   *
+   * Reactions are stored on the message and shared with the visitor, so the
+   * server is the source of truth: the ack (or the broadcast) is what repaints,
+   * and a failed send leaves the previous state alone.
    */
   const handleToggleReaction = (messageId: string, emoji: string) => {
-    const previous = myReactions[messageId];
+    const socket = socketRef.current;
 
-    setMyReactions((prev) => {
-      if (prev[messageId] === emoji) {
-        const next = { ...prev };
-        delete next[messageId];
-        return next;
-      }
-      return { ...prev, [messageId]: emoji };
-    });
+    if (!socket) return;
 
-    setReactions((prev) => {
-      const msgReactions = { ...(prev[messageId] || {}) };
+    const mine = summarizeReactions(
+      messagesRef.current.find((message) => message.id === messageId)?.reactions,
+      currentUser.id,
+    ).mine;
 
-      if (previous && previous !== emoji) {
-        const left = (msgReactions[previous] || 0) - 1;
-        if (left > 0) msgReactions[previous] = left;
-        else delete msgReactions[previous];
-      }
+    const next = mine === emoji ? "" : emoji;
 
-      if (previous === emoji) {
-        const left = (msgReactions[emoji] || 0) - 1;
-        if (left > 0) msgReactions[emoji] = left;
-        else delete msgReactions[emoji];
-      } else {
-        msgReactions[emoji] = (msgReactions[emoji] || 0) + 1;
-      }
+    void socket
+      .timeout(8000)
+      .emitWithAck("message:react", { messageId, emoji: next })
+      .then((ack: { ok?: boolean; reactions?: MessageReaction[] }) => {
+        if (ack?.ok && Array.isArray(ack.reactions)) {
+          applyMessageReactions(messageId, ack.reactions);
+        }
+      })
+      .catch(() => {
+        // A lost ack leaves the previous badges in place rather than showing a
+        // reaction the server never stored.
+      });
+  };
 
-      return { ...prev, [messageId]: msgReactions };
-    });
+  /** Reactions are message state, so they ride along with the message itself. */
+  const applyMessageReactions = (messageId: string, reactions: MessageReaction[]) => {
+    if (recovering.current) {
+      bufferedReactions.current.set(messageId, reactions);
+      return;
+    }
+
+    setMessages((previous) =>
+      previous.map((message) => (message.id === messageId ? { ...message, reactions } : message)),
+    );
   };
 
   const applyFormat = (prefix: string, suffix: string = prefix) => {
@@ -1685,8 +1754,10 @@ function ConversationThread({
                   ? message.senderName || message.sender?.name || "Nhân viên hỗ trợ"
                   : message.senderName || visitorLabel(conversation);
 
-                const msgReactions = reactions[message.id] || {};
-                const reactionKeys = Object.keys(msgReactions);
+                const { badges: reactionBadges, mine: myReaction } = summarizeReactions(
+                  message.reactions,
+                  currentUser.id,
+                );
 
                 return (
                   <Fragment key={message.id}>
@@ -1728,8 +1799,12 @@ function ConversationThread({
                               key={emoji}
                               type="button"
                               onClick={() => handleToggleReaction(message.id, emoji)}
-                              className="w-5 h-5 flex items-center justify-center text-xs hover:scale-125 transition cursor-pointer"
-                              title={`Thả cảm xúc ${emoji}`}
+                              className={`w-5 h-5 flex items-center justify-center text-xs hover:scale-125 transition cursor-pointer rounded ${
+                                myReaction === emoji ? "bg-current/15 ring-1 ring-current/40" : ""
+                              }`}
+                              title={
+                                myReaction === emoji ? "Bỏ cảm xúc của bạn" : `Thả cảm xúc ${emoji}`
+                              }
                             >
                               {emoji}
                             </button>
@@ -1804,27 +1879,25 @@ function ConversationThread({
                         </div>
 
                         {/* Reaction Badges */}
-                        {reactionKeys.length > 0 && (
+                        {reactionBadges.length > 0 && (
                           <div
                             className={`flex flex-wrap gap-1 mt-1 ${
                               fromAgent ? "justify-end" : "justify-start"
                             }`}
                           >
-                            {reactionKeys.map((emoji) => (
+                            {reactionBadges.map((badge) => (
                               <button
-                                key={emoji}
+                                key={badge.emoji}
                                 type="button"
-                                onClick={() => handleToggleReaction(message.id, emoji)}
-                                title={emoji === myReactions[message.id] ? "Bỏ cảm xúc của bạn" : `Thả ${emoji}`}
+                                onClick={() => handleToggleReaction(message.id, badge.emoji)}
+                                title={badge.mine ? "Bỏ cảm xúc của bạn" : `Thả ${badge.emoji}`}
                                 className={`text-[11px] px-1.5 py-0.5 rounded-md flex items-center gap-1 cursor-pointer transition active:scale-90 ${currentTheme.classes.reactionBadge} ${
-                                  emoji === myReactions[message.id]
-                                    ? "ring-1 ring-current/40 font-semibold"
-                                    : ""
+                                  badge.mine ? "ring-1 ring-current/40 font-semibold" : ""
                                 }`}
                               >
-                                <span>{emoji}</span>
+                                <span>{badge.emoji}</span>
                                 <span className="font-mono text-[10px] font-bold">
-                                  {msgReactions[emoji]}
+                                  {badge.count}
                                 </span>
                               </button>
                             ))}

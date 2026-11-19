@@ -61,9 +61,37 @@ test('split service: sockets, REST broadcast, presence and live revocation', { t
   assert.equal(sent.message.conversationId, cid);
   assert.ok(sent.message.id);
   assert.equal((await reply).id, sent.message.id);
+  // A new message starts with no reactions, so older clients keep working.
+  assert.deepEqual(sent.message.reactions, []);
+  // Reactions live on the message: whoever reacts, both sides see one list.
+  const visitorReaction = event(member, 'message:reactions');
+  assert.equal((await visitor.timeout(5000).emitWithAck('message:react', { messageId: sent.message.id, emoji: '👍' })).ok, true);
+  const visitorPayload = await visitorReaction;
+  assert.equal(visitorPayload.messageId, sent.message.id);
+  assert.deepEqual(visitorPayload.reactions.map((reaction) => [reaction.emoji, reaction.kind]), [['👍', 'visitor']]);
+  assert.ok(visitorPayload.reactions[0].id);
+  const agentReaction = event(visitor, 'message:reactions');
+  const agentAck = await member.timeout(5000).emitWithAck('message:react', { messageId: sent.message.id, emoji: '🎉' });
+  assert.equal(agentAck.ok, true);
+  assert.deepEqual(agentAck.reactions.map((reaction) => [reaction.emoji, reaction.kind]), [['👍', 'visitor'], ['🎉', 'agent']]);
+  assert.equal((await agentReaction).reactions.length, 2);
+  // One reaction per person: the same tap again clears it.
+  const cleared = await visitor.timeout(5000).emitWithAck('message:react', { messageId: sent.message.id, emoji: '' });
+  assert.equal(cleared.ok, true);
+  assert.deepEqual(cleared.reactions.map((reaction) => reaction.kind), ['agent']);
+  // A visitor cannot reach a thread that is not the one in its token.
+  const elsewhere = await visitor.timeout(5000).emitWithAck('message:react', { messageId: new mongoose.Types.ObjectId().toString(), emoji: '👍' });
+  assert.equal(elsewhere.ok, false);
+  // A string that looks like a field path is refused before it is stored.
+  const pathLike = await visitor.timeout(5000).emitWithAck('message:react', { messageId: sent.message.id, emoji: '$body' });
+  assert.equal(pathLike.ok, false);
   const note = event(visitor, 'message:new');
   assert.equal((await request('/conversations/' + cid + '/close', 'POST')).status, 200);
-  assert.equal((await note).senderKind, 'system');
+  const systemNotice = await note;
+  assert.equal(systemNotice.senderKind, 'system');
+  // System notices are not a person's words, so they take no reactions.
+  const onNotice = await member.timeout(5000).emitWithAck('message:react', { messageId: systemNotice.id, emoji: '👍' });
+  assert.equal(onNotice.ok, false);
   await new Promise((resolve) => setTimeout(resolve, 3200));
   assert.equal((await request('/widget/availability', 'GET', undefined, session.data.visitorToken)).data.agentsOnline, true);
   const revoked = event(member, 'access:revoked');

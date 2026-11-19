@@ -12,7 +12,11 @@ import {
 import { JwtService } from '@nestjs/jwt';
 import { Server, Socket } from 'socket.io';
 import { ChatService } from './shared/chat/chat.service.js';
-import { MESSAGE_MAX_LENGTH } from './shared/chat/message.schema.js';
+import {
+  MESSAGE_MAX_LENGTH,
+  REACTION_MAX_LENGTH,
+  serializeReactions,
+} from './shared/chat/message.schema.js';
 import { WidgetService } from './shared/widget/widget.service.js';
 import { SitesService } from './shared/sites/sites.service.js';
 import { UsersService } from './shared/users/users.service.js';
@@ -32,6 +36,9 @@ const SEND_WINDOW_MS = 10_000;
 const VISITOR_SEND_LIMIT = 10;
 /** Staff type faster and are authenticated, so they get more headroom. */
 const AGENT_SEND_LIMIT = 40;
+
+/** Reactions are lighter than messages, but a tap-hold can still spam writes. */
+const REACT_LIMIT = 20;
 
 interface VisitorSocketData {
   kind: 'visitor';
@@ -279,6 +286,110 @@ export class ChatGateway
     return { ok: true, message: serialized };
   }
 
+  /**
+   * One reaction per person per message. The reactor is always taken from the
+   * socket identity, never from the payload, so a visitor cannot react as an
+   * agent or as somebody else.
+   */
+  @SubscribeMessage('message:react')
+  async handleMessageReact(
+    @ConnectedSocket() socket: Socket,
+    @MessageBody() payload: unknown,
+  ): Promise<{ ok: boolean; error?: string; reactions?: Array<Record<string, unknown>> }> {
+    const data = socket.data as SocketData | undefined;
+
+    if (!data) {
+      return { ok: false, error: 'Not authenticated' };
+    }
+
+    // Capped before the lookup: a reaction is a small write anyone can trigger,
+    // and the widget is embeddable on any page.
+    if (
+      !this.rateLimiter.consume(
+        `react:${data.kind}:${data.kind === 'visitor' ? data.visitorId : data.userId}`,
+        REACT_LIMIT,
+        SEND_WINDOW_MS,
+      )
+    ) {
+      return { ok: false, error: 'Bạn thao tác quá nhanh, chờ một chút rồi thử lại.' };
+    }
+
+    const messageId = this.readMessageId(payload);
+
+    if (!messageId) {
+      return { ok: false, error: 'messageId is required' };
+    }
+
+    const emoji = this.readEmoji(payload);
+
+    if (emoji === null) {
+      return { ok: false, error: 'Invalid reaction' };
+    }
+
+    const message = await this.chatService.findMessageById(messageId);
+
+    if (!message) {
+      return { ok: false, error: 'Message not found' };
+    }
+
+    const conversationId = String(message.conversationId);
+
+    // System notices ("đã tham gia", reminders) are not something people react to.
+    if (message.senderKind === 'system') {
+      return { ok: false, error: 'Tin nhắn hệ thống không nhận cảm xúc' };
+    }
+
+    // A visitor may only touch its own thread, and only while the project is
+    // live — the same gate `message:send` uses.
+    if (data.kind === 'visitor') {
+      if (conversationId !== data.conversationId || String(message.siteId) !== data.siteId) {
+        return { ok: false, error: 'Message not found' };
+      }
+
+      const site = await this.sitesService.findById(String(message.siteId));
+
+      if (!site) return { ok: false, error: 'Message not found' };
+
+      if (!site.active) {
+        socket.emit('widget:maintenance', { maintenance: true });
+        return { ok: false, error: 'Hệ thống chat đang bảo trì. Vui lòng quay lại sau.' };
+      }
+    }
+
+    if (data.kind === 'agent') {
+      const siteId = String(message.siteId);
+
+      if (
+        !this.agents.mayRead(socket.id, siteId) ||
+        (await this.sitesService.accessFor(siteId, data.userId)) === 'none'
+      ) {
+        return { ok: false, error: 'Message not found' };
+      }
+    }
+
+    const updated = await this.chatService.setReaction({
+      messageId,
+      conversationId,
+      kind: data.kind,
+      reactorId: data.kind === 'visitor' ? data.visitorId : data.userId,
+      emoji,
+    });
+
+    if (!updated) {
+      return { ok: false, error: 'Message not found' };
+    }
+
+    const reactions = serializeReactions(updated.reactions);
+
+    // The visitor and every agent watching this thread are in this room, and
+    // they are exactly the people who can see the message being reacted to.
+    this.server
+      .to(conversationRoom(conversationId))
+      .emit('message:reactions', { messageId, conversationId, reactions });
+
+    return { ok: true, reactions };
+  }
+
   /** Agents open a thread to watch it live; this also clears its unread badge. */
   @SubscribeMessage('conversation:join')
   async handleConversationJoin(
@@ -484,5 +595,56 @@ export class ChatGateway
     const raw = (payload as { conversationId: unknown }).conversationId;
 
     return typeof raw === 'string' && raw ? raw : null;
+  }
+
+  private readMessageId(payload: unknown): string | null {
+    if (
+      typeof payload !== 'object' ||
+      payload === null ||
+      !('messageId' in payload)
+    ) {
+      return null;
+    }
+
+    const raw = (payload as { messageId: unknown }).messageId;
+
+    return typeof raw === 'string' && raw ? raw.slice(0, 64) : null;
+  }
+
+  /**
+   * An empty string means "take my reaction back". Anything that is not a
+   * single glyph-like token is rejected rather than truncated: a reaction is
+   * never more than one emoji sequence, and whitespace would signal that the
+   * caller is using this channel as a text field.
+   */
+  private readEmoji(payload: unknown): string | null {
+    if (typeof payload !== 'object' || payload === null || !('emoji' in payload)) {
+      return null;
+    }
+
+    const raw = (payload as { emoji: unknown }).emoji;
+
+    if (typeof raw !== 'string') {
+      return null;
+    }
+
+    const trimmed = raw.trim();
+
+    if (!trimmed) {
+      return '';
+    }
+
+    if (trimmed.length > REACTION_MAX_LENGTH || /\s/.test(trimmed)) {
+      return null;
+    }
+
+    // "$body" is a stored field, not an emoji. The write is `$literal`-wrapped,
+    // so nothing is evaluated, but keeping such strings out of the data means a
+    // reader never has to wonder.
+    if (trimmed.startsWith('$')) {
+      return null;
+    }
+
+    return trimmed;
   }
 }

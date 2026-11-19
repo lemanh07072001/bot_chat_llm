@@ -29,6 +29,18 @@ export interface WidgetSettings {
 
 export type MessageSenderKind = 'visitor' | 'agent' | 'system';
 
+export type ReactionKind = 'visitor' | 'agent';
+
+/**
+ * One person's reaction. `id` is a visitor or user id, so a client tells its own
+ * reaction apart by comparing it with its own identity.
+ */
+export interface MessageReaction {
+  emoji: string;
+  kind: ReactionKind;
+  id: string;
+}
+
 /**
  * The public half of a staff account: what the api is willing to tell a
  * visitor about the person answering them.
@@ -50,6 +62,7 @@ export interface ChatMessage {
   /** Present on agent messages pushed over the socket. */
   sender?: AgentProfile | null;
   body: string;
+  reactions?: MessageReaction[];
   createdAt: string;
 }
 
@@ -70,6 +83,8 @@ export interface WidgetSession {
   visitorToken: string;
   realtimeUrl?: string;
   visitorKey: string;
+  /** This visitor's own id, so a reaction can be recognised as its own. */
+  visitorId: string;
   conversationId: string;
   settings: WidgetSettings;
   availability: WidgetAvailability;

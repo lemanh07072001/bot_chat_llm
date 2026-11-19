@@ -207,6 +207,108 @@ export const STYLES = `
   /* A follow-up from the same person: keep the indent, drop the repetition. */
   .row.grouped .sender { display: none; }
 
+  /* Reactions live on their own wrapped line under the bubble, so a long badge
+     row never squeezes the message text. */
+  .row.reactable { flex-wrap: wrap; }
+  .row-extra {
+    flex: 0 0 100%;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    margin-top: 3px;
+    min-width: 0;
+  }
+  .from-visitor .row-extra { align-items: flex-end; }
+  .from-agent .row-extra { align-items: flex-start; }
+
+  .reactions {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 4px;
+    opacity: 0;
+    transition: opacity 0.12s ease;
+  }
+  .row:hover .reactions,
+  .row:focus-within .reactions,
+  .row.has-reactions .reactions,
+  .row.react-open .reactions { opacity: 1; }
+  /* No hover on a phone, so the entry point is always faintly visible. */
+  @media (hover: none) { .reactions { opacity: 0.7; } }
+
+  .reaction-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    height: 22px;
+    padding: 0 8px;
+    border: 1px solid var(--cc-hairline);
+    border-radius: 999px;
+    background: var(--cc-surface);
+    color: var(--cc-muted);
+    font-family: inherit;
+    font-size: 11px;
+    font-weight: 600;
+    line-height: 1;
+    cursor: pointer;
+  }
+  .reaction-badge:hover { background: var(--cc-agent-bg); }
+  .reaction-badge:focus-visible { outline: 2px solid var(--cc-theme); outline-offset: 1px; }
+  .reaction-badge.mine {
+    border-color: var(--cc-theme);
+    color: var(--cc-theme);
+    background: var(--cc-surface);
+  }
+  .reaction-glyph { font-size: 13px; line-height: 1; }
+
+  .react-trigger {
+    display: grid;
+    place-items: center;
+    width: 22px;
+    height: 22px;
+    padding: 0;
+    border: 1px dashed var(--cc-hairline);
+    border-radius: 999px;
+    background: transparent;
+    color: var(--cc-muted);
+    cursor: pointer;
+  }
+  .react-trigger:hover { background: var(--cc-agent-bg); color: var(--cc-text); }
+  .react-trigger:focus-visible { outline: 2px solid var(--cc-theme); outline-offset: 1px; }
+  .react-trigger svg { width: 13px; height: 13px; fill: currentColor; }
+
+  .react-bar {
+    display: none;
+    align-items: center;
+    gap: 1px;
+    padding: 3px;
+    border: 1px solid var(--cc-hairline);
+    border-radius: 999px;
+    background: var(--cc-surface);
+    box-shadow: 0 2px 10px rgba(15, 23, 42, 0.1);
+  }
+  .row.react-open .react-bar { display: flex; }
+
+  .react-choice {
+    width: 30px;
+    height: 30px;
+    padding: 0;
+    border: 0;
+    border-radius: 999px;
+    background: transparent;
+    font-family: inherit;
+    font-size: 17px;
+    line-height: 1;
+    cursor: pointer;
+    transition: transform 0.12s ease, background 0.12s ease;
+  }
+  .react-choice:hover { background: var(--cc-agent-bg); transform: scale(1.18); }
+  .react-choice:focus-visible { outline: 2px solid var(--cc-theme); outline-offset: -2px; }
+  @media (prefers-reduced-motion: reduce) {
+    .react-choice { transition: none; }
+    .react-choice:hover { transform: none; }
+  }
+
   .load-older { display: none; padding: 8px 14px 0; text-align: center; }
   .load-older.visible { display: block; }
   .load-older button {
@@ -465,6 +567,26 @@ export const STYLES = `
   }
   .emoji-cell:hover { background: var(--cc-agent-bg); }
   .emoji-cell:focus-visible { outline: 2px solid var(--cc-theme); outline-offset: -2px; }
+
+  /* Reserves the grid's shape while the dataset is in flight, so the panel
+     opens at its final height instead of growing under the visitor's cursor. */
+  .emoji-skeleton-cell {
+    height: 36px;
+    border-radius: 6px;
+    background: var(--cc-agent-bg);
+    animation: cc-emoji-pulse 1.2s ease-in-out infinite;
+  }
+  .emoji-skeleton-cell:nth-child(2n) { animation-delay: 0.15s; }
+  .emoji-skeleton-cell:nth-child(3n) { animation-delay: 0.3s; }
+
+  @keyframes cc-emoji-pulse {
+    0%, 100% { opacity: 0.35; }
+    50% { opacity: 0.85; }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .emoji-skeleton-cell { animation: none; opacity: 0.5; }
+  }
 
   .emoji-empty {
     padding: 24px 12px;

@@ -13,6 +13,7 @@ import {
   Message,
   MessageDocument,
   MessageSenderKind,
+  ReactionKind,
 } from './message.schema.js';
 
 export interface AppendMessageInput {
@@ -23,6 +24,15 @@ export interface AppendMessageInput {
   senderName?: string;
   body: string;
   externalId?: string;
+}
+
+export interface SetReactionInput {
+  messageId: string;
+  conversationId: string;
+  kind: ReactionKind;
+  reactorId: string;
+  /** An empty string removes the caller's reaction. */
+  emoji: string;
 }
 
 /** Which slice of the inbox to show. */
@@ -357,6 +367,70 @@ export class ChatService {
       senderId: null,
       body,
     });
+  }
+
+  /** A single message, or null when the id is not a valid ObjectId. */
+  async findMessageById(messageId: string): Promise<MessageDocument | null> {
+    if (!Types.ObjectId.isValid(messageId)) return null;
+
+    return this.messageModel.findById(messageId).exec();
+  }
+
+  /**
+   * Applies one reaction and returns the message as it is afterwards.
+   *
+   * The whole change is a single update pipeline: the caller's previous entry is
+   * filtered out and the new one appended in the same write. Reading the
+   * document, editing it and saving would let two people reacting at once
+   * overwrite each other, and the array cannot carry a unique index because the
+   * uniqueness is on a tuple inside it.
+   */
+  async setReaction(input: SetReactionInput): Promise<MessageDocument | null> {
+    const reactorId = new Types.ObjectId(input.reactorId);
+    const next = input.emoji
+      ? [{ emoji: input.emoji, kind: input.kind, reactorId }]
+      : [];
+
+    return this.messageModel
+      .findOneAndUpdate(
+        {
+          _id: new Types.ObjectId(input.messageId),
+          conversationId: new Types.ObjectId(input.conversationId),
+          // System notices are not part of the conversation people react to.
+          senderKind: { $ne: 'system' },
+        },
+        [
+          {
+            $set: {
+              reactions: {
+                $concatArrays: [
+                  {
+                    $filter: {
+                      input: { $ifNull: ['$reactions', []] },
+                      as: 'reaction',
+                      cond: {
+                        $not: [
+                          {
+                            $and: [
+                              { $eq: ['$$reaction.kind', input.kind] },
+                              { $eq: ['$$reaction.reactorId', reactorId] },
+                            ],
+                          },
+                        ],
+                      },
+                    },
+                  },
+                  // `$literal`, or an emoji that looks like a field path
+                  // ("$body") would be evaluated as one.
+                  { $literal: next },
+                ],
+              },
+            },
+          },
+        ],
+        { returnDocument: 'after', updatePipeline: true },
+      )
+      .exec();
   }
 
   async markReadByAgent(conversationId: string): Promise<void> {
