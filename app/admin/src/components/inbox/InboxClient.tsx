@@ -36,6 +36,7 @@ import {
   MessageCircle,
   ArrowLeft,
   Smile,
+  Plus,
   ChevronDown,
   Inbox,
   Bold,
@@ -66,6 +67,7 @@ import {
   type SlashQuery,
 } from "@/lib/canned";
 import { CannedPickerPanel, CannedSuggestions, useEffectiveCanned } from "./CannedPicker";
+import { EmojiPickerPanel, EmojiPopover, QUICK_REACTIONS } from "./EmojiPicker";
 
 interface CurrentUser {
   id: string;
@@ -114,7 +116,8 @@ const TYPING_THROTTLE_MS = 1200;
 const TYPING_IDLE_MS = 2000;
 const COUNTS_REFRESH_DEBOUNCE_MS = 2500;
 
-const QUICK_EMOJIS = ["👍", "👋", "😊", "🙏", "❤️", "⏳", "✨", "🎯", "👏", "💬"];
+/** The composer's first row: the glyphs agents actually insert, not reactions. */
+const QUICK_EMOJIS = ["👍", "🙏", "😊", "❤️", "👋", "✨", "🎉", "⏳"];
 
 // Modern B2B SaaS Avatar Color Tokens (Subtle pastel surfaces with high-contrast text)
 const AVATAR_PALETTES = [
@@ -1069,12 +1072,24 @@ function ConversationThread({
   const [slash, setSlash] = useState<SlashQuery | null>(null);
   const [slashIndex, setSlashIndex] = useState(0);
   const [showEmojiPicker, setShowEmojiPicker] = useState(false);
+  /** Which message's reaction popover is open, and where its "+" sits. */
+  const [reactionPickerFor, setReactionPickerFor] = useState<{
+    id: string;
+    rect: { left: number; top: number; bottom: number; width: number };
+  } | null>(null);
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [reactions, setReactions] = useState<Record<string, Record<string, number>>>({});
+  /** Which emoji this agent picked per message, so a second tap undoes it. */
+  const [myReactions, setMyReactions] = useState<Record<string, string>>({});
 
   const cannedMenuRef = useRef<HTMLDivElement | null>(null);
   const cannedPanelRef = useRef<HTMLDivElement | null>(null);
   const emojiPickerRef = useRef<HTMLDivElement | null>(null);
+  /** The panel itself lives outside the button, so both count as "inside". */
+  const emojiPanelRef = useRef<HTMLDivElement | null>(null);
+  const composerRef = useRef<HTMLDivElement | null>(null);
+  /** How tall the emoji panel may be before it runs past the top of the screen. */
+  const [emojiPanelMaxHeight, setEmojiPanelMaxHeight] = useState<number | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const lastTypingSentAt = useRef(0);
@@ -1267,13 +1282,32 @@ function ConversationThread({
       ) {
         setShowCannedMenu(false);
       }
-      if (emojiPickerRef.current && !emojiPickerRef.current.contains(target)) {
+      const insideEmoji =
+        (emojiPickerRef.current?.contains(target) ?? false) ||
+        (emojiPanelRef.current?.contains(target) ?? false);
+      if (!insideEmoji) {
         setShowEmojiPicker(false);
       }
     };
     document.addEventListener("mousedown", handleClickOutside);
     return () => document.removeEventListener("mousedown", handleClickOutside);
   }, []);
+
+  useEffect(() => {
+    if (!showEmojiPicker) return;
+
+    // The panel opens upward from the composer, so the ceiling is the composer's
+    // top edge: on a short window it has to shrink instead of being cut off.
+    const measure = () => {
+      const top = composerRef.current?.getBoundingClientRect().top;
+      if (top == null) return;
+      setEmojiPanelMaxHeight(Math.max(192, Math.min(352, Math.floor(top - 16))));
+    };
+
+    measure();
+    window.addEventListener("resize", measure);
+    return () => window.removeEventListener("resize", measure);
+  }, [showEmojiPicker]);
 
   useEffect(() => {
     if (textareaRef.current) {
@@ -1371,9 +1405,22 @@ function ConversationThread({
   };
 
   const handleInsertEmoji = (emoji: string) => {
-    setDraft((prev) => `${prev}${emoji}`);
-    setShowEmojiPicker(false);
-    textareaRef.current?.focus();
+    const input = textareaRef.current;
+    const start = input?.selectionStart ?? draft.length;
+    const end = input?.selectionEnd ?? draft.length;
+
+    // Functional update: two picks in quick succession must not write the same
+    // stale draft twice.
+    setDraft((prev) => prev.slice(0, start) + emoji + prev.slice(end));
+    setSlash(null);
+
+    // Keep the picker open like Messenger: people send several in a row.
+    requestAnimationFrame(() => {
+      if (!input) return;
+      input.focus();
+      const caret = start + emoji.length;
+      input.setSelectionRange(caret, caret);
+    });
   };
 
   const handleCopyMessage = async (id: string, text: string) => {
@@ -1386,10 +1433,39 @@ function ConversationThread({
     }
   };
 
+  /**
+   * Like Facebook: one reaction per message per agent. Picking a different
+   * emoji swaps it, picking the same one takes it back.
+   */
   const handleToggleReaction = (messageId: string, emoji: string) => {
+    const previous = myReactions[messageId];
+
+    setMyReactions((prev) => {
+      if (prev[messageId] === emoji) {
+        const next = { ...prev };
+        delete next[messageId];
+        return next;
+      }
+      return { ...prev, [messageId]: emoji };
+    });
+
     setReactions((prev) => {
       const msgReactions = { ...(prev[messageId] || {}) };
-      msgReactions[emoji] = (msgReactions[emoji] || 0) + 1;
+
+      if (previous && previous !== emoji) {
+        const left = (msgReactions[previous] || 0) - 1;
+        if (left > 0) msgReactions[previous] = left;
+        else delete msgReactions[previous];
+      }
+
+      if (previous === emoji) {
+        const left = (msgReactions[emoji] || 0) - 1;
+        if (left > 0) msgReactions[emoji] = left;
+        else delete msgReactions[emoji];
+      } else {
+        msgReactions[emoji] = (msgReactions[emoji] || 0) + 1;
+      }
+
       return { ...prev, [messageId]: msgReactions };
     });
   };
@@ -1647,7 +1723,7 @@ function ConversationThread({
                             currentTheme.classes.reactionBar
                           }`}
                         >
-                          {["👍", "❤️", "😂", "🎉", "🚀"].map((emoji) => (
+                          {QUICK_REACTIONS.map((emoji) => (
                             <button
                               key={emoji}
                               type="button"
@@ -1658,6 +1734,26 @@ function ConversationThread({
                               {emoji}
                             </button>
                           ))}
+                          <button
+                            type="button"
+                            data-emoji-trigger=""
+                            onClick={(event) => {
+                              const rect = event.currentTarget.getBoundingClientRect();
+                              setReactionPickerFor((previous) =>
+                                previous?.id === message.id
+                                  ? null
+                                  : { id: message.id, rect },
+                              );
+                            }}
+                            className={`w-5 h-5 flex items-center justify-center rounded-full transition cursor-pointer hover:scale-125 ${
+                              reactionPickerFor?.id === message.id ? "opacity-100" : "opacity-70"
+                            }`}
+                            title="Chọn cảm xúc khác"
+                            aria-label="Chọn cảm xúc khác"
+                            aria-expanded={reactionPickerFor?.id === message.id}
+                          >
+                            <Plus className="w-3 h-3" />
+                          </button>
                           <span className="w-px h-3 bg-neutral-300 dark:bg-white/20 mx-0.5" />
                           <button
                             type="button"
@@ -1671,6 +1767,19 @@ function ConversationThread({
                             )}
                           </button>
                         </div>
+
+                        {/* Full reaction picker, opened from the "+" in the bar */}
+                        {reactionPickerFor?.id === message.id && (
+                          <EmojiPopover
+                            anchor={reactionPickerFor.rect}
+                            theme={currentTheme}
+                            onPick={(emoji) => {
+                              handleToggleReaction(message.id, emoji);
+                              setReactionPickerFor(null);
+                            }}
+                            onClose={() => setReactionPickerFor(null)}
+                          />
+                        )}
 
                         {/* Sender Label */}
                         <div
@@ -1706,7 +1815,12 @@ function ConversationThread({
                                 key={emoji}
                                 type="button"
                                 onClick={() => handleToggleReaction(message.id, emoji)}
-                                className={`text-[11px] px-1.5 py-0.5 rounded-md flex items-center gap-1 cursor-pointer transition active:scale-90 ${currentTheme.classes.reactionBadge}`}
+                                title={emoji === myReactions[message.id] ? "Bỏ cảm xúc của bạn" : `Thả ${emoji}`}
+                                className={`text-[11px] px-1.5 py-0.5 rounded-md flex items-center gap-1 cursor-pointer transition active:scale-90 ${currentTheme.classes.reactionBadge} ${
+                                  emoji === myReactions[message.id]
+                                    ? "ring-1 ring-current/40 font-semibold"
+                                    : ""
+                                }`}
                               >
                                 <span>{emoji}</span>
                                 <span className="font-mono text-[10px] font-bold">
@@ -1761,7 +1875,10 @@ function ConversationThread({
       </div>
 
       {/* 3. SaaS Composer Box */}
-      <div className={`p-3 sm:p-4 shrink-0 transition-colors relative ${currentTheme.classes.composerWrapper}`}>
+      <div
+        ref={composerRef}
+        className={`p-3 sm:p-4 shrink-0 transition-colors relative ${currentTheme.classes.composerWrapper}`}
+      >
         {/* Floating Slash Autocomplete Palette */}
         {slash && (
           <div className="absolute bottom-full left-3 sm:left-4 mb-2 z-50 animate-in fade-in slide-in-from-bottom-2 duration-150">
@@ -1794,6 +1911,23 @@ function ConversationThread({
               onClose={() => setShowCannedMenu(false)}
               canManageSite={isProjectOwner}
               theme={currentTheme}
+            />
+          </div>
+        )}
+
+        {/* Floating emoji panel — anchored to the composer, not the toolbar button,
+            so it cannot overflow the right edge on a narrow screen. */}
+        {showEmojiPicker && (
+          <div
+            ref={emojiPanelRef}
+            className="absolute bottom-full left-3 sm:left-4 mb-2 z-50 animate-in fade-in slide-in-from-bottom-2 duration-150"
+          >
+            <EmojiPickerPanel
+              theme={currentTheme}
+              quick={QUICK_EMOJIS}
+              onPick={handleInsertEmoji}
+              onClose={() => setShowEmojiPicker(false)}
+              maxHeight={emojiPanelMaxHeight}
             />
           </div>
         )}
@@ -1886,6 +2020,14 @@ function ConversationThread({
               }
 
               if (event.key === "Escape") {
+                if (showEmojiPicker) {
+                  // The panel refocuses the textarea after a pick, so Escape
+                  // arrives here rather than on the panel.
+                  event.preventDefault();
+                  setShowEmojiPicker(false);
+                  return;
+                }
+
                 if (slash) {
                   event.preventDefault();
                   setSlash(null);
@@ -1916,7 +2058,13 @@ function ConversationThread({
             {/* Left Quick Tools */}
             <div className="flex items-center gap-1 sm:gap-1.5 flex-wrap">
               {/* Markdown Quick Formatting */}
-              <div className="flex items-center bg-black/5 dark:bg-white/5 rounded-lg p-0.5 border border-black/5 dark:border-white/10">
+              <div
+                className={`flex items-center rounded-lg p-0.5 border ${
+                  currentTheme.id === "front-amber"
+                    ? "bg-amber-100/60 border-amber-200/80 text-amber-950"
+                    : "bg-black/5 dark:bg-white/5 border-black/5 dark:border-white/10 text-current"
+                }`}
+              >
                 <button
                   type="button"
                   onClick={() => applyFormat("**")}
@@ -1970,11 +2118,23 @@ function ConversationThread({
                 >
                   <Sparkles className={`w-3.5 h-3.5 ${currentTheme.uiAccent.icon}`} />
                   <span className="font-medium">Mẫu câu</span>
-                  <span className="text-[10px] opacity-60 font-mono px-1 py-0.2 rounded bg-black/5 dark:bg-white/10">
+                  <span
+                    className={`text-[10px] font-mono px-1 py-0.2 rounded border ${
+                      currentTheme.id === "front-amber"
+                        ? "bg-amber-100/90 border-amber-300/80 text-amber-900 font-semibold"
+                        : "bg-black/5 dark:bg-white/10 border-black/5 dark:border-white/10 opacity-70"
+                    }`}
+                  >
                     /
                   </span>
                   {totalCannedCount > 0 && (
-                    <span className="rounded-full bg-black/5 dark:bg-white/10 px-1 text-[10px] font-semibold opacity-75">
+                    <span
+                      className={`rounded-full px-1.5 py-0.2 text-[10px] font-semibold ${
+                        currentTheme.id === "front-amber"
+                          ? "bg-amber-200/80 text-amber-950 border border-amber-300/60"
+                          : "bg-black/5 dark:bg-white/10 opacity-75"
+                      }`}
+                    >
                       {totalCannedCount}
                     </span>
                   )}
@@ -2003,28 +2163,19 @@ function ConversationThread({
                 >
                   <Smile className="w-3.5 h-3.5" />
                 </button>
-
-                {showEmojiPicker && (
-                  <div className="absolute bottom-full left-0 mb-2 rounded-2xl bg-white/95 dark:bg-[#161922]/95 backdrop-blur-xl border border-neutral-200/90 dark:border-white/15 shadow-2xl p-2 z-40 flex items-center gap-1 animate-in fade-in zoom-in-95 duration-150">
-                    {QUICK_EMOJIS.map((emoji, idx) => (
-                      <button
-                        key={idx}
-                        type="button"
-                        onClick={() => handleInsertEmoji(emoji)}
-                        className="w-7 h-7 rounded-lg hover:bg-black/5 dark:hover:bg-white/10 flex items-center justify-center text-sm transition cursor-pointer hover:scale-115 active:scale-95"
-                      >
-                        {emoji}
-                      </button>
-                    ))}
-                  </div>
-                )}
               </div>
             </div>
 
             {/* Right Tools: Keyboard Shortcut Hint & Send Action */}
             <div className="flex items-center gap-2">
-              <span className="text-[11px] opacity-60 font-medium hidden md:inline-flex items-center gap-1">
-                <kbd className="px-1.5 py-0.5 rounded bg-black/5 dark:bg-white/10 border border-black/10 dark:border-white/15 text-[10px] font-mono shadow-2xs">
+              <span className="text-[11px] opacity-70 font-medium hidden md:inline-flex items-center gap-1">
+                <kbd
+                  className={`px-1.5 py-0.5 rounded border text-[10px] font-mono shadow-2xs ${
+                    currentTheme.id === "front-amber"
+                      ? "bg-amber-100/80 border-amber-200/90 text-amber-900"
+                      : "bg-black/5 dark:bg-white/10 border-black/10 dark:border-white/15"
+                  }`}
+                >
                   Enter
                 </kbd>
                 gửi
