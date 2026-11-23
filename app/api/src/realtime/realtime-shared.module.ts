@@ -3,6 +3,7 @@ import { Global, Module } from '@nestjs/common';
 import { AgentRegistryService } from './agent-registry.service.js';
 import { RealtimeBusService } from './realtime-bus.service.js';
 import { RateLimiterService } from './rate-limiter.service.js';
+import { VisitorRegistryService } from './visitor-registry.service.js';
 
 /**
  * Deliberately dependency-free and global. The websocket gateway fills these
@@ -11,7 +12,7 @@ import { RateLimiterService } from './rate-limiter.service.js';
  */
 @Global()
 @Module({
-  providers: [AgentRegistryService, RealtimeBusService, RateLimiterService, RedisBridgeService],
-  exports: [AgentRegistryService, RealtimeBusService, RateLimiterService, RedisBridgeService],
+  providers: [AgentRegistryService, VisitorRegistryService, RealtimeBusService, RateLimiterService, RedisBridgeService],
+  exports: [AgentRegistryService, VisitorRegistryService, RealtimeBusService, RateLimiterService, RedisBridgeService],
 })
 export class RealtimeSharedModule {}

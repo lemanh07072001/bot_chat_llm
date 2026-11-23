@@ -7,6 +7,7 @@ import { ChatService } from './chat.service.js';
 import { ConversationsController } from './conversations.controller.js';
 import { SitesModule } from '../sites/sites.module.js';
 import { UsersModule } from '../users/users.module.js';
+import { NotificationsModule } from '../notifications/notifications.module.js';
 import { InternalNote, InternalNoteSchema } from './internal-note.schema.js';
 import { InternalNotesService } from './internal-notes.service.js';
 
@@ -14,6 +15,8 @@ import { InternalNotesService } from './internal-notes.service.js';
   imports: [
     SitesModule,
     UsersModule,
+    // One direction only: the bell never imports ChatModule back.
+    NotificationsModule,
     MongooseModule.forFeature([
       { name: Visitor.name, schema: VisitorSchema },
       { name: Conversation.name, schema: ConversationSchema },

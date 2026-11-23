@@ -1,7 +1,8 @@
 /**
  * Emoji assets for the widget.
  *
- * The dataset (~183 KB of labels and keywords) and the fill font (~1 MB) are
+ * The dataset (~183 KB of labels and keywords) and the emoji font (~2 MB, the
+ * whole Noto Color Emoji in COLRv1 so every emoji has one consistent look) are
  * served as static files next to the bundle instead of being bundled into
  * widget.js: every customer page would otherwise download them, whether or not
  * it ever opens the picker. Fetched lazily, a page that shows no emoji pays
@@ -13,13 +14,25 @@
  * script src (or an explicit data-asset-base-url) keeps it correct.
  *
  * `unicode-range` is the same range the admin panel uses: it makes the font
- * lazy at the glyph level, so the 1 MB file is only downloaded when a codepoint
- * the subset actually owns is on screen.
+ * lazy at the glyph level, so the file is only downloaded once an emoji is on
+ * screen. Plain digits, # * © ® ™ are left out of it so ordinary text keeps
+ * the page font.
+ *
+ * Only registered where the browser can paint COLRv1. Safari cannot, and would
+ * draw every emoji blank; there the platform font (Apple Color Emoji) is used.
  */
+
+function supportsColrV1(): boolean {
+  try {
+    return typeof CSS !== 'undefined' && CSS.supports('font-tech(color-COLRv1)');
+  } catch {
+    return false;
+  }
+}
 
 export const EMOJI_FONT_FAMILY = 'ChatEmojiFill';
 
-export const EMOJI_UNICODE_RANGE = 'U+200D, U+20E3, U+2194-2195, U+2620, U+2640, U+2642, U+2695-2696, U+26A7, U+26D3, U+26F9, U+2708, U+2744, U+2764, U+27A1, U+2B1B, U+FE0E-FE0F, U+1F1E6-1F1FF, U+1F308, U+1F32B, U+1F33E, U+1F344, U+1F34B, U+1F373, U+1F37C, U+1F384, U+1F393, U+1F3A4, U+1F3A8, U+1F3C3-1F3C4, U+1F3CA-1F3CC, U+1F3EB, U+1F3ED, U+1F3F3-1F3F4, U+1F408, U+1F426, U+1F43B, U+1F466-1F469, U+1F46E-1F471, U+1F473, U+1F477, U+1F481-1F482, U+1F486-1F487, U+1F48B, U+1F4A5, U+1F4A8, U+1F4AB, U+1F4BB-1F4BC, U+1F525, U+1F527, U+1F52C, U+1F575, U+1F62E, U+1F635-1F636, U+1F642, U+1F645-1F647, U+1F64B, U+1F64D-1F64E, U+1F680, U+1F692, U+1F6A3, U+1F6B4-1F6B6, U+1F6D6-1F6D9, U+1F6DC-1F6DF, U+1F6FB-1F6FC, U+1F7E9, U+1F7EB, U+1F7F0, U+1F90C, U+1F91D, U+1F926, U+1F935, U+1F937-1F939, U+1F93C-1F93E, U+1F972, U+1F977-1F979, U+1F9A3-1F9A4, U+1F9AB-1F9AD, U+1F9AF-1F9B3, U+1F9B8-1F9B9, U+1F9BC-1F9BD, U+1F9CB-1F9CF, U+1F9D1-1F9D2, U+1F9D4, U+1F9D6-1F9DF, U+1FA70, U+1FA74-1FA77, U+1FA79, U+1FA7B-1FA7C, U+1FA83-1FA8F, U+1FA96-1FAC6, U+1FAC8, U+1FACC-1FADD, U+1FADF-1FAEB, U+1FAEF-1FAFA, U+E0020-E007F';
+export const EMOJI_UNICODE_RANGE = 'U+200D, U+203C, U+2049, U+20E3, U+2139, U+2194-2199, U+21A9-21AA, U+231A-231B, U+2328, U+23CF, U+23E9-23F3, U+23F8-23FA, U+24C2, U+25AA-25AB, U+25B6, U+25C0, U+25FB-25FE, U+2600-2604, U+260E, U+2611, U+2614-2615, U+2618, U+261D, U+2620, U+2622-2623, U+2626, U+262A, U+262E-262F, U+2638-263A, U+2640, U+2642, U+2648-2653, U+265F-2660, U+2663, U+2665-2666, U+2668, U+267B, U+267E-267F, U+2692-2697, U+2699, U+269B-269C, U+26A0-26A1, U+26A7, U+26AA-26AB, U+26B0-26B1, U+26BD-26BE, U+26C4-26C5, U+26C8, U+26CE-26CF, U+26D1, U+26D3-26D4, U+26E9-26EA, U+26F0-26F5, U+26F7-26FA, U+26FD, U+2702, U+2705, U+2708-270D, U+270F, U+2712, U+2714, U+2716, U+271D, U+2721, U+2728, U+2733-2734, U+2744, U+2747, U+274C, U+274E, U+2753-2755, U+2757, U+2763-2764, U+2795-2797, U+27A1, U+27B0, U+27BF, U+2934-2935, U+2B05-2B07, U+2B1B-2B1C, U+2B50, U+2B55, U+3030, U+303D, U+3297, U+3299, U+FE0E-FE0F, U+1F004, U+1F0CF, U+1F170-1F171, U+1F17E-1F17F, U+1F18E, U+1F191-1F19A, U+1F1E6-1F1FF, U+1F201-1F202, U+1F21A, U+1F22F, U+1F232-1F23A, U+1F250-1F251, U+1F300-1F321, U+1F324-1F393, U+1F396-1F397, U+1F399-1F39B, U+1F39E-1F3F0, U+1F3F3-1F3F5, U+1F3F7-1F4FD, U+1F4FF-1F53D, U+1F549-1F54E, U+1F550-1F567, U+1F56F-1F570, U+1F573-1F57A, U+1F587, U+1F58A-1F58D, U+1F590, U+1F595-1F596, U+1F5A4-1F5A5, U+1F5A8, U+1F5B1-1F5B2, U+1F5BC, U+1F5C2-1F5C4, U+1F5D1-1F5D3, U+1F5DC-1F5DE, U+1F5E1, U+1F5E3, U+1F5E8, U+1F5EF, U+1F5F3, U+1F5FA-1F64F, U+1F680-1F6C5, U+1F6CB-1F6D2, U+1F6D5-1F6D9, U+1F6DC-1F6E5, U+1F6E9, U+1F6EB-1F6EC, U+1F6F0, U+1F6F3-1F6FC, U+1F7E0-1F7EB, U+1F7F0, U+1F90C-1F93A, U+1F93C-1F945, U+1F947-1F9FF, U+1FA70-1FA7C, U+1FA80-1FAC6, U+1FAC8, U+1FACC-1FADD, U+1FADF-1FAEB, U+1FAEF-1FAFA, U+E0020-E007F';
 
 export interface EmojiEntry {
   e: string;
@@ -132,7 +145,7 @@ export function registerEmojiFont(base: string): Promise<void> {
   // works there, it just renders with the platform emoji font.
   const fonts = typeof document === 'undefined' ? undefined : document.fonts;
 
-  if (!fonts) {
+  if (!fonts || !supportsColrV1()) {
     registeredFonts.set(base, null);
     return Promise.resolve();
   }
@@ -160,7 +173,9 @@ export async function loadEmojiFont(base: string, timeoutMs = 1500): Promise<voi
 
   const fonts = typeof document === 'undefined' ? undefined : document.fonts;
 
-  if (!fonts) {
+  // Nothing registered on purpose (no FontFaceSet, or no COLRv1): the platform
+  // font is the answer, not a failure to retry.
+  if (!fonts || registeredFonts.get(base) === null) {
     return;
   }
 

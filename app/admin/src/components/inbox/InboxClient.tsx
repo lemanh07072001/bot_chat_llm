@@ -7,13 +7,11 @@ import {
   useMemo,
   useRef,
   useState,
-  useSyncExternalStore,
   type RefObject,
 } from "react";
 import { io, type Socket } from "socket.io-client";
+import { useSearchParams } from "next/navigation";
 import {
-  Bell,
-  BellOff,
   CheckCircle2,
   ChevronUp,
   Globe,
@@ -36,6 +34,8 @@ import {
   MessageCircle,
   ArrowLeft,
   Smile,
+  SmilePlus,
+  Check,
   Plus,
   ChevronDown,
   Inbox,
@@ -57,10 +57,11 @@ import {
   filterToQuery,
   matchesFilter,
   summarizeReactions,
+  joinNames,
   visitorLabel,
 } from "@/lib/chat";
 import { InternalNotes } from "./InternalNotes";
-import { type AccountPreferences } from "./preferences";
+import { type AccountPreferences, announcePreferences } from "./preferences";
 import { getChatTheme, type ChatTheme } from "./chatThemes";
 import {
   DEFAULT_CANNED_TEMPLATES,
@@ -75,6 +76,16 @@ import {
 } from "@/lib/canned";
 import { CannedPickerPanel, CannedSuggestions, useEffectiveCanned } from "./CannedPicker";
 import { EmojiPickerPanel, EmojiPopover, QUICK_REACTIONS } from "./EmojiPicker";
+import { useNotifications } from "@/components/notifications/NotificationsProvider";
+import {
+  AttachButton,
+  AttachmentTray,
+  MessageAttachments,
+  handleImagePaste,
+  useAttachmentUploads,
+  useImageDrop,
+} from "@/components/attachments";
+import { ATTACHMENT_ERRORS } from "@/lib/attachments";
 
 interface CurrentUser {
   id: string;
@@ -104,20 +115,6 @@ interface InboxClientProps {
 }
 
 type MemberView = { userId: string; name: string; email: string | null; role: string };
-type NotifyPermission = NotificationPermission | "unsupported";
-
-const notifyListeners = new Set<() => void>();
-
-function subscribeNotifyPermission(listener: () => void): () => void {
-  notifyListeners.add(listener);
-  return () => {
-    notifyListeners.delete(listener);
-  };
-}
-
-function readNotifyPermission(): NotifyPermission {
-  return typeof Notification === "undefined" ? "unsupported" : Notification.permission;
-}
 
 const TYPING_THROTTLE_MS = 1200;
 const TYPING_IDLE_MS = 2000;
@@ -194,36 +191,6 @@ function sortByActivity(list: Conversation[]): Conversation[] {
   );
 }
 
-function playChime() {
-  try {
-    const AudioCtor =
-      window.AudioContext ??
-      (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
-
-    if (!AudioCtor) return;
-
-    const context = new AudioCtor();
-    const gain = context.createGain();
-    gain.gain.setValueAtTime(0.0001, context.currentTime);
-    gain.gain.exponentialRampToValueAtTime(0.08, context.currentTime + 0.01);
-    gain.gain.exponentialRampToValueAtTime(0.0001, context.currentTime + 0.35);
-    gain.connect(context.destination);
-
-    [880, 1174].forEach((frequency, index) => {
-      const oscillator = context.createOscillator();
-      oscillator.type = "sine";
-      oscillator.frequency.value = frequency;
-      oscillator.connect(gain);
-      oscillator.start(context.currentTime + index * 0.12);
-      oscillator.stop(context.currentTime + index * 0.12 + 0.12);
-    });
-
-    setTimeout(() => void context.close(), 800);
-  } catch {
-    // Audio unavailable or blocked; non-blocking.
-  }
-}
-
 export function InboxClient({
   initial,
   initialFilter,
@@ -256,17 +223,7 @@ export function InboxClient({
   const [showRightSidebar, setShowRightSidebar] = useState(true);
   const [mobileShowChat, setMobileShowChat] = useState(false);
   const theme = getChatTheme("front-amber");
-
-  const notifyPermission = useSyncExternalStore(
-    subscribeNotifyPermission,
-    readNotifyPermission,
-    () => "default" as const,
-  );
-
-  const soundEnabledRef = useRef(soundEnabled);
-  useEffect(() => {
-    soundEnabledRef.current = soundEnabled;
-  }, [soundEnabled]);
+  const { setActiveConversation } = useNotifications();
 
   useEffect(() => {
     const controller = new AbortController();
@@ -302,8 +259,11 @@ export function InboxClient({
         body: JSON.stringify({ soundEnabled: !soundEnabled }),
       });
       if (!response.ok) throw new Error("save");
-      preferencesRef.current = await response.json();
-      setSoundEnabled(!soundEnabled);
+      const saved = (await response.json()) as AccountPreferences;
+      preferencesRef.current = saved;
+      setSoundEnabled(saved.soundEnabled ?? !soundEnabled);
+      // The provider plays the chime: it must see the toggle before the next message.
+      announcePreferences(saved);
     } catch { setError("Không lưu được tùy chọn âm thanh."); }
     finally { setSavingSound(false); }
   }
@@ -315,6 +275,14 @@ export function InboxClient({
     new Map(initial.conversations.map((item) => [item.id, item.unreadForAgent ?? 0])),
   );
   const countsTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Read outside state updaters, where a side effect would run twice.
+  const conversationIds = useRef(
+    new Set(initial.conversations.map((conversation) => conversation.id)),
+  );
+
+  useEffect(() => {
+    conversationIds.current = new Set(conversations.map((conversation) => conversation.id));
+  }, [conversations]);
 
   useEffect(() => {
     selectedIdRef.current = selectedId;
@@ -334,13 +302,8 @@ export function InboxClient({
     0,
   );
 
-  useEffect(() => {
-    const base = "Hộp thư đến · Chat Center";
-    document.title = totalUnread > 0 ? `(${totalUnread}) ${base}` : base;
-    return () => {
-      document.title = base;
-    };
-  }, [totalUnread]);
+  // The dashboard provider owns the tab title; this page only keeps the
+  // in-page "N tin mới" chip derived from the loaded list.
 
   const refreshCounts = useCallback(() => {
     if (countsTimer.current) return;
@@ -433,19 +396,54 @@ export function InboxClient({
     void loadList(next);
   };
 
-  const notifyNewMessage = useCallback((conversation: Conversation) => {
-    if (soundEnabledRef.current) playChime();
+  // Re-announcing the join is how the server marks the visible thread read.
+  // Each conversation keeps its own cooldown, and a request that arrives while
+  // one is in flight or cooling down is remembered and sent once more after it,
+  // so the thread the agent is looking at always ends up read.
+  const JOIN_COOLDOWN_MS = 1000;
+  const joinStates = useRef(
+    new Map<string, { pending: boolean; timer: ReturnType<typeof setTimeout> | null }>(),
+  );
+  const joinAgain = useCallback((conversationId: string) => {
+    const socket = socketRef.current;
+    if (!socket) return;
 
-    if (typeof Notification === "undefined" || Notification.permission !== "granted") {
+    const existing = joinStates.current.get(conversationId);
+    if (existing) {
+      existing.pending = true;
       return;
     }
 
-    try {
-      new Notification(`Tin nhắn mới · ${visitorLabel(conversation)}`, {
-        body: conversation.lastMessagePreview ?? "",
-        tag: conversation.id,
-      });
-    } catch {}
+    const state: { pending: boolean; timer: ReturnType<typeof setTimeout> | null } = {
+      pending: false,
+      timer: null,
+    };
+    joinStates.current.set(conversationId, state);
+
+    const send = () => {
+      socket.emit("conversation:join", { conversationId });
+      state.timer = setTimeout(() => {
+        state.timer = null;
+        if (!state.pending) {
+          joinStates.current.delete(conversationId);
+          return;
+        }
+        state.pending = false;
+        send();
+      }, JOIN_COOLDOWN_MS);
+    };
+
+    send();
+  }, []);
+
+  useEffect(() => {
+    const states = joinStates.current;
+    return () => {
+      for (const state of states.values()) {
+        if (state.timer) clearTimeout(state.timer);
+      }
+      states.clear();
+    };
   }, []);
 
   useEffect(() => {
@@ -479,8 +477,16 @@ export function InboxClient({
       const unread = incoming.unreadForAgent ?? 0;
       const previousUnread = seenUnread.current.get(incoming.id) ?? 0;
       seenUnread.current.set(incoming.id, unread);
-      if (unread > previousUnread && (incoming.id !== selectedIdRef.current || document.hidden)) {
-        notifyNewMessage(incoming);
+      // Sound/desktop alerts live in the dashboard provider now. What stays
+      // here is the open-thread fix: a message read in the visible thread must
+      // be marked read on the server again, or unreadForAgent stays > 0.
+      if (
+        unread > 0 &&
+        unread > previousUnread &&
+        incoming.id === selectedIdRef.current &&
+        !document.hidden
+      ) {
+        joinAgain(incoming.id);
       }
       if (searchRef.current.trim()) {
         void loadList(filterRef.current);
@@ -517,20 +523,85 @@ export function InboxClient({
       socket.close();
       socketRef.current = null;
     };
-  }, [apiOrigin, currentUser.id, notifyNewMessage, refreshCounts, loadList]);
+  }, [apiOrigin, currentUser.id, refreshCounts, loadList, joinAgain]);
 
-  const selectConversation = (id: string) => {
-    const url = new URL(window.location.href);
-    url.searchParams.set("conversation", id);
-    window.history.replaceState(null, "", url);
-    setSelectedId(id);
-    setMobileShowChat(true);
-    setConversations((previous) =>
-      previous.map((conversation) =>
-        conversation.id === id ? { ...conversation, unreadForAgent: 0 } : conversation,
-      ),
-    );
-  };
+  // A notification can point at a conversation outside the loaded page/filter,
+  // so fetch its thread before selecting it.
+  const ensureConversation = useCallback(async (id: string): Promise<boolean> => {
+    try {
+      const response = await fetch(
+        `/api/conversations/${encodeURIComponent(id)}/messages`,
+        { cache: "no-store" },
+      );
+      if (!response.ok) return false;
+      const data = (await response.json()) as { conversation?: Conversation };
+      if (!data.conversation) return false;
+      const conversation = data.conversation;
+      setConversations((previous) =>
+        sortByActivity([conversation, ...previous.filter((item) => item.id !== id)]),
+      );
+      return true;
+    } catch {
+      return false;
+    }
+  }, []);
+
+  const selectConversation = useCallback(
+    (id: string) => {
+      const url = new URL(window.location.href);
+      url.searchParams.set("conversation", id);
+      window.history.replaceState(null, "", url);
+      setSelectedId(id);
+      setMobileShowChat(true);
+      // Not in the loaded page/filter: pull it in so the panel can render it.
+      if (!conversationIds.current.has(id)) void ensureConversation(id);
+      setConversations((previous) =>
+        previous.map((conversation) =>
+          conversation.id === id ? { ...conversation, unreadForAgent: 0 } : conversation,
+        ),
+      );
+    },
+    [ensureConversation],
+  );
+
+  // The bell/provider dispatches this before navigating, because Next does not
+  // remount the inbox when only the query string changes.
+  useEffect(() => {
+    const listener = (event: Event) => {
+      const id = (event as CustomEvent<{ conversationId?: string }>).detail?.conversationId;
+      if (typeof id === "string" && id) selectConversation(id);
+    };
+    window.addEventListener("inbox:open-conversation", listener);
+    return () => window.removeEventListener("inbox:open-conversation", listener);
+  }, [selectConversation]);
+
+  // Back/forward and `router.push` change only the query string, so no remount
+  // happens; follow the param whenever it names a different thread. The
+  // `replaceState` writes above do not change `searchParams`, and the ref is
+  // already updated by then, so this cannot bounce back and forth.
+  const searchParams = useSearchParams();
+  const conversationParam = searchParams.get("conversation");
+  useEffect(() => {
+    if (!conversationParam) return;
+    if (conversationParam === selectedIdRef.current) return;
+    selectConversation(conversationParam);
+  }, [conversationParam, selectConversation]);
+
+  // Lets the provider suppress alerts for the thread this tab is showing.
+  useEffect(() => {
+    setActiveConversation(selectedId);
+    return () => setActiveConversation(null);
+  }, [selectedId, setActiveConversation]);
+
+  // Coming back to the tab re-marks the open thread read, matching the server's
+  // own read-on-join behaviour.
+  useEffect(() => {
+    const onVisible = () => {
+      if (!document.hidden && selectedIdRef.current) joinAgain(selectedIdRef.current);
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => document.removeEventListener("visibilitychange", onVisible);
+  }, [joinAgain]);
 
   const runAction = async (
     conversationId: string,
@@ -572,12 +643,6 @@ export function InboxClient({
     } catch {
       setError("Không kết nối được tới máy chủ.");
     }
-  };
-
-  const requestNotifications = async () => {
-    if (typeof Notification === "undefined") return;
-    await Notification.requestPermission();
-    notifyListeners.forEach((listener) => listener());
   };
 
   const countFor = (key: InboxFilter): number | null => {
@@ -677,26 +742,6 @@ export function InboxClient({
               <VolumeX className="w-3.5 h-3.5" />
             )}
           </button>
-
-          {/* Browser Notifications */}
-          {notifyPermission === "default" && (
-            <button
-              type="button"
-              onClick={() => void requestNotifications()}
-              className="inline-flex items-center gap-1.5 text-xs font-medium px-2.5 py-1.5 rounded-lg border border-neutral-200 bg-white text-neutral-700 hover:bg-neutral-50 transition cursor-pointer shadow-2xs"
-            >
-              <Bell className={`w-3.5 h-3.5 ${theme.uiAccent.icon}`} />
-              <span className="hidden sm:inline">Thông báo</span>
-            </button>
-          )}
-          {notifyPermission === "denied" && (
-            <span
-              title="Trình duyệt đã chặn thông báo"
-              className="inline-flex items-center gap-1 text-xs p-1.5 rounded-lg border border-neutral-200 bg-neutral-50 text-neutral-400 shadow-2xs"
-            >
-              <BellOff className="w-3.5 h-3.5" />
-            </span>
-          )}
 
           {/* Realtime Status Indicator */}
           <div
@@ -1085,6 +1130,11 @@ function ConversationThread({
     rect: { left: number; top: number; bottom: number; width: number };
   } | null>(null);
   const [copiedId, setCopiedId] = useState<string | null>(null);
+  /**
+   * Which message has its quick-reaction strip open. `below` flips it under
+   * the button when there is no room above, e.g. on the first message.
+   */
+  const [quickReactFor, setQuickReactFor] = useState<{ id: string; below: boolean } | null>(null);
 
   const cannedMenuRef = useRef<HTMLDivElement | null>(null);
   const cannedPanelRef = useRef<HTMLDivElement | null>(null);
@@ -1101,6 +1151,23 @@ function ConversationThread({
   const stickToBottom = useRef(true);
   const messagesRef = useRef(messages);
   useEffect(() => { messagesRef.current = messages; }, [messages]);
+
+  useEffect(() => {
+    if (!quickReactFor) return;
+    const onPointerDown = (event: PointerEvent) => {
+      if (event.target instanceof Element && event.target.closest("[data-quick-react]")) return;
+      setQuickReactFor(null);
+    };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setQuickReactFor(null);
+    };
+    document.addEventListener("pointerdown", onPointerDown, true);
+    document.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.removeEventListener("pointerdown", onPointerDown, true);
+      document.removeEventListener("keydown", onKeyDown);
+    };
+  }, [quickReactFor]);
   /**
    * True while history is being re-read after a reconnect. A reaction that
    * arrives meanwhile is newer than the page being fetched, so it is held back
@@ -1118,10 +1185,39 @@ function ConversationThread({
   const initials = getInitials(label);
   const palette = getAvatarPalette(label);
 
+  /** Agent names seen in this thread, so a colleague's reaction can be named. */
+  const agentNames = useMemo(() => {
+    const names = new Map<string, string>();
+    for (const message of messages) {
+      const name = message.sender?.name ?? message.senderName;
+      if (message.senderKind === "agent" && message.senderId && name) {
+        names.set(message.senderId, name);
+      }
+    }
+    return names;
+  }, [messages]);
+  const reactorName = useCallback(
+    (reaction: { kind: "visitor" | "agent"; id: string }) =>
+      reaction.kind === "visitor" ? label : (agentNames.get(reaction.id) ?? "Nhân viên khác"),
+    [agentNames, label],
+  );
+
   // The project's own set and the shared set, already narrowed by the mode the
   // project chose. Null until loaded (or if the call failed), in which case the
   // picker still offers the agent's own replies.
   const effective = useEffectiveCanned(conversation.siteId);
+
+  // Image uploads for the composer. The thread is keyed by conversation id, so
+  // switching conversation remounts it; the clear() below also covers a reused
+  // instance.
+  const uploads = useAttachmentUploads(conversation.siteId);
+  const { clear: clearUploads } = uploads;
+  useEffect(() => clearUploads, [conversationId, clearUploads]);
+  const { isDragging, dropProps } = useImageDrop(uploads.addFiles, { disabled: !connected });
+  // The tray stays filled while the ack is pending, so a second Enter must not
+  // resend the same (already claimed) images.
+  const sendingRef = useRef(false);
+
   const groups = useMemo(
     () => cannedGroups({ personal: personalTemplates, effective, siteName }),
     [personalTemplates, effective, siteName],
@@ -1398,8 +1494,11 @@ function ConversationThread({
   const send = async () => {
     const body = draft.trim();
     const socket = socketRef.current;
+    const attachmentIds = uploads.ids;
 
-    if (!body || !socket?.connected) return;
+    if ((!body && attachmentIds.length === 0) || uploads.busy || uploads.hasErrors || !socket?.connected) return;
+    if (sendingRef.current) return;
+    sendingRef.current = true;
 
     setDraft("");
     setSlash(null);
@@ -1410,14 +1509,21 @@ function ConversationThread({
 
     const ack = (await socket
       .timeout(10000)
-      .emitWithAck("message:send", { conversationId, body })
+      .emitWithAck("message:send", { conversationId, body, attachmentIds })
       .catch(() => null)) as { ok: boolean; error?: string; message?: ChatMessage } | null;
 
+    sendingRef.current = false;
+
     if (!ack?.ok) {
+      // Keep the picked images in the tray so the agent can retry — unless the
+      // server says they were already claimed (e.g. the ack timed out after save).
+      if (ack?.error === ATTACHMENT_ERRORS.claimed) uploads.removeSent(attachmentIds);
       setDraft(body);
       onError(ack?.error ?? "Không gửi được tin nhắn.");
       return;
     }
+
+    uploads.removeSent(attachmentIds);
 
     if (ack.message) {
       const sent = ack.message;
@@ -1757,6 +1863,7 @@ function ConversationThread({
                 const { badges: reactionBadges, mine: myReaction } = summarizeReactions(
                   message.reactions,
                   currentUser.id,
+                  reactorName,
                 );
 
                 return (
@@ -1786,63 +1893,6 @@ function ConversationThread({
                       )}
 
                       <div className="max-w-[85%] sm:max-w-[72%] relative">
-                        {/* Hover Quick Action Bar */}
-                        <div
-                          className={`absolute -top-7 ${
-                            fromAgent ? "right-0" : "left-0"
-                          } hidden group-hover:flex items-center gap-0.5 px-1.5 py-0.5 rounded-lg z-20 transition-all opacity-0 group-hover:opacity-100 ${
-                            currentTheme.classes.reactionBar
-                          }`}
-                        >
-                          {QUICK_REACTIONS.map((emoji) => (
-                            <button
-                              key={emoji}
-                              type="button"
-                              onClick={() => handleToggleReaction(message.id, emoji)}
-                              className={`w-5 h-5 flex items-center justify-center text-xs hover:scale-125 transition cursor-pointer rounded ${
-                                myReaction === emoji ? "bg-current/15 ring-1 ring-current/40" : ""
-                              }`}
-                              title={
-                                myReaction === emoji ? "Bỏ cảm xúc của bạn" : `Thả cảm xúc ${emoji}`
-                              }
-                            >
-                              {emoji}
-                            </button>
-                          ))}
-                          <button
-                            type="button"
-                            data-emoji-trigger=""
-                            onClick={(event) => {
-                              const rect = event.currentTarget.getBoundingClientRect();
-                              setReactionPickerFor((previous) =>
-                                previous?.id === message.id
-                                  ? null
-                                  : { id: message.id, rect },
-                              );
-                            }}
-                            className={`w-5 h-5 flex items-center justify-center rounded-full transition cursor-pointer hover:scale-125 ${
-                              reactionPickerFor?.id === message.id ? "opacity-100" : "opacity-70"
-                            }`}
-                            title="Chọn cảm xúc khác"
-                            aria-label="Chọn cảm xúc khác"
-                            aria-expanded={reactionPickerFor?.id === message.id}
-                          >
-                            <Plus className="w-3 h-3" />
-                          </button>
-                          <span className="w-px h-3 bg-neutral-300 dark:bg-white/20 mx-0.5" />
-                          <button
-                            type="button"
-                            onClick={() => void handleCopyMessage(message.id, message.body)}
-                            className="p-1 hover:text-amber-600 transition cursor-pointer text-[10px] flex items-center gap-0.5"
-                            title="Sao chép nội dung tin nhắn"
-                          >
-                            <Copy className="w-3 h-3" />
-                            {copiedId === message.id && (
-                              <span className="text-[9px] text-emerald-500 font-medium">Đã chép</span>
-                            )}
-                          </button>
-                        </div>
-
                         {/* Full reaction picker, opened from the "+" in the bar */}
                         {reactionPickerFor?.id === message.id && (
                           <EmojiPopover
@@ -1867,15 +1917,144 @@ function ConversationThread({
                           {senderLabel}
                         </div>
 
-                        {/* Message Bubble Body */}
-                        <div
-                          className={`px-4 py-2.5 text-xs sm:text-[13px] leading-relaxed whitespace-pre-wrap [overflow-wrap:anywhere] transition-all ${
-                            fromAgent
-                              ? currentTheme.classes.agentBubble
-                              : currentTheme.classes.visitorBubble
-                          }`}
-                        >
-                          {message.body}
+                        {/* Message Bubble Body, with its hover actions beside it */}
+                        <div className="relative">
+                          <div
+                            className={`px-4 py-2.5 text-xs sm:text-[13px] leading-relaxed whitespace-pre-wrap [overflow-wrap:anywhere] transition-all ${
+                              fromAgent
+                                ? currentTheme.classes.agentBubble
+                                : currentTheme.classes.visitorBubble
+                            }`}
+                          >
+                            <MessageAttachments
+                              attachments={message.attachments}
+                              tone={fromAgent ? "agent" : "visitor"}
+                              className={message.body ? "mb-1.5" : ""}
+                            />
+                            {message.body}
+                          </div>
+
+                          {/* Side actions: react and copy. Kept beside the bubble
+                              so they never cover the sender label or the message
+                              above, and never get clipped at the top of the stream. */}
+                          <div
+                            data-quick-react=""
+                            // visitorMeta, not agentMeta, on both sides: agentMeta
+                            // is tinted for the agent bubble and washes out on the stream.
+                            className={`absolute top-1/2 -translate-y-1/2 z-20 flex items-center gap-0.5 transition-opacity duration-150 ${
+                              currentTheme.classes.visitorMeta
+                            } ${
+                              fromAgent ? "right-full mr-1 flex-row-reverse" : "left-full ml-1"
+                            } ${
+                              quickReactFor?.id === message.id || reactionPickerFor?.id === message.id
+                                ? "opacity-100"
+                                : "opacity-0 pointer-events-none group-hover:opacity-100 group-hover:pointer-events-auto focus-within:opacity-100 focus-within:pointer-events-auto"
+                            }`}
+                          >
+                            <button
+                              type="button"
+                              onClick={(event) => {
+                                const rect = event.currentTarget.getBoundingClientRect();
+                                const streamTop = scrollRef.current?.getBoundingClientRect().top ?? 0;
+                                setQuickReactFor((previous) =>
+                                  previous?.id === message.id
+                                    ? null
+                                    : { id: message.id, below: rect.top - streamTop < 44 },
+                                );
+                              }}
+                              className={`w-7 h-7 flex items-center justify-center rounded-full transition hover:bg-current/10 ${
+                                quickReactFor?.id === message.id ? "bg-current/10" : ""
+                              }`}
+                              title="Thả cảm xúc"
+                              aria-label="Thả cảm xúc"
+                              aria-expanded={quickReactFor?.id === message.id}
+                            >
+                              <SmilePlus className="w-4 h-4" />
+                            </button>
+                            {message.body && (
+                            <button
+                              type="button"
+                              onClick={() => void handleCopyMessage(message.id, message.body)}
+                              className="w-7 h-7 flex items-center justify-center rounded-full transition hover:bg-current/10"
+                              title={copiedId === message.id ? "Đã chép" : "Sao chép nội dung tin nhắn"}
+                              aria-label="Sao chép nội dung tin nhắn"
+                            >
+                              {copiedId === message.id ? (
+                                <Check className="w-4 h-4 text-emerald-500" />
+                              ) : (
+                                <Copy className="w-3.5 h-3.5" />
+                              )}
+                            </button>
+                            )}
+
+                            {quickReactFor?.id === message.id && (
+                              <div
+                                role="menu"
+                                aria-label="Cảm xúc nhanh"
+                                // Line the strip up with the buttons, but keep it
+                                // inside the stream: beside a wide bubble there is
+                                // not room for all seven buttons.
+                                ref={(strip) => {
+                                  const host = strip?.parentElement;
+                                  const stream = scrollRef.current;
+                                  if (!strip || !host || !stream) return;
+                                  const bounds = stream.getBoundingClientRect();
+                                  const anchor = host.getBoundingClientRect();
+                                  const width = strip.offsetWidth;
+                                  const preferred = fromAgent ? anchor.right - width : anchor.left;
+                                  const left = Math.max(
+                                    Math.min(preferred, bounds.right - 8 - width),
+                                    bounds.left + 8,
+                                  );
+                                  strip.style.left = `${left - anchor.left}px`;
+                                }}
+                                className={`absolute ${
+                                  quickReactFor.below ? "top-full mt-1" : "bottom-full mb-1"
+                                } flex items-center gap-0.5 px-1.5 py-1 rounded-lg whitespace-nowrap ${
+                                  currentTheme.classes.reactionBar
+                                }`}
+                              >
+                                {QUICK_REACTIONS.map((emoji) => (
+                                  <button
+                                    key={emoji}
+                                    type="button"
+                                    role="menuitem"
+                                    onClick={() => {
+                                      handleToggleReaction(message.id, emoji);
+                                      setQuickReactFor(null);
+                                    }}
+                                    className={`w-7 h-7 flex items-center justify-center text-base rounded-full transition hover:scale-125 hover:bg-current/10 ${
+                                      myReaction === emoji ? "bg-current/15 ring-1 ring-current/40" : ""
+                                    }`}
+                                    title={
+                                      myReaction === emoji ? "Bỏ cảm xúc của bạn" : `Thả cảm xúc ${emoji}`
+                                    }
+                                  >
+                                    {emoji}
+                                  </button>
+                                ))}
+                                <button
+                                  type="button"
+                                  role="menuitem"
+                                  data-emoji-trigger=""
+                                  onClick={(event) => {
+                                    const rect = event.currentTarget.getBoundingClientRect();
+                                    setQuickReactFor(null);
+                                    setReactionPickerFor((previous) =>
+                                      previous?.id === message.id
+                                        ? null
+                                        : { id: message.id, rect },
+                                    );
+                                  }}
+                                  className="w-7 h-7 flex items-center justify-center rounded-full transition opacity-70 hover:opacity-100 hover:bg-current/10"
+                                  title="Chọn cảm xúc khác"
+                                  aria-label="Chọn cảm xúc khác"
+                                >
+                                  <Plus className="w-3.5 h-3.5" />
+                                </button>
+                              </div>
+                            )}
+                          </div>
                         </div>
 
                         {/* Reaction Badges */}
@@ -1890,7 +2069,15 @@ function ConversationThread({
                                 key={badge.emoji}
                                 type="button"
                                 onClick={() => handleToggleReaction(message.id, badge.emoji)}
-                                title={badge.mine ? "Bỏ cảm xúc của bạn" : `Thả ${badge.emoji}`}
+                                title={`${joinNames(
+                                  badge.mine ? ["Bạn", ...badge.others] : badge.others,
+                                )} đã thả ${badge.emoji}\n${
+                                  badge.mine
+                                    ? "Bấm để gỡ"
+                                    : myReaction
+                                      ? `Bấm để đổi sang ${badge.emoji}`
+                                      : "Bấm để thả cùng"
+                                }`}
                                 className={`text-[11px] px-1.5 py-0.5 rounded-md flex items-center gap-1 cursor-pointer transition active:scale-90 ${currentTheme.classes.reactionBadge} ${
                                   badge.mine ? "ring-1 ring-current/40 font-semibold" : ""
                                 }`}
@@ -2026,13 +2213,26 @@ function ConversationThread({
 
         {/* Outer SaaS Input Container */}
         <div
-          className={`transition-all flex flex-col ${currentTheme.classes.composerInner}`}
+          {...dropProps}
+          className={`transition-all flex flex-col ${currentTheme.classes.composerInner} ${
+            isDragging ? "outline-2 outline-dashed outline-amber-500 outline-offset-2 bg-amber-50/60" : ""
+          }`}
         >
+          <AttachmentTray
+            items={uploads.items}
+            onRemove={uploads.remove}
+            onRetry={uploads.retry}
+            notice={uploads.notice}
+            onDismissNotice={uploads.dismissNotice}
+          />
 
           {/* Auto-resizing Textarea */}
           <textarea
             ref={textareaRef}
             value={draft}
+            onPaste={(event) => {
+              if (connected) handleImagePaste(event, uploads.addFiles);
+            }}
             onChange={(event) => {
               const value = event.target.value;
               setDraft(value);
@@ -2172,6 +2372,11 @@ function ConversationThread({
                 </button>
               </div>
 
+              <AttachButton
+                onFiles={uploads.addFiles}
+                disabled={!connected}
+              />
+
               <div className="h-4 w-px bg-black/10 dark:bg-white/10 mx-0.5 hidden sm:block" />
 
               {/* Canned Responses Popover Trigger */}
@@ -2257,7 +2462,16 @@ function ConversationThread({
               <button
                 type="button"
                 onClick={() => void send()}
-                disabled={!connected || !draft.trim()}
+                disabled={
+                  !connected || uploads.busy || uploads.hasErrors || (!draft.trim() && uploads.ids.length === 0)
+                }
+                title={
+                  uploads.busy
+                    ? "Đang tải ảnh lên…"
+                    : uploads.hasErrors
+                      ? ATTACHMENT_ERRORS.retryHint
+                      : undefined
+                }
                 aria-label="Gửi tin nhắn"
                 className={`inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-xl text-xs font-semibold disabled:opacity-40 disabled:cursor-not-allowed transition shadow-xs cursor-pointer active:scale-95 ${currentTheme.classes.sendButton}`}
               >

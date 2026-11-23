@@ -7,6 +7,7 @@ import { SitesService } from '../sites/sites.service.js';
 import { UsersService } from '../users/users.service.js';
 import { ChatService } from '../chat/chat.service.js';
 import { Message } from '../chat/message.schema.js';
+import { ATTACHMENT_PLACEHOLDER, serializeAttachments } from '../attachments/attachment.types.js';
 import { agentProfileOf } from '../users/user.schema.js';
 import { RealtimeBusService } from '../realtime/realtime-bus.service.js';
 import { TelegramConfig, TelegramLink, TelegramPollState, TelegramThread } from './telegram.schema.js';
@@ -179,7 +180,12 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
             // Split without truncating visitor text; each fragment is replyable.
             // JS string length is UTF-16; keep even emoji-heavy chunks below
             // Telegram's limit and avoid cutting a surrogate pair in half.
-            const chars = Array.from(message.body);
+            // Image-only messages have no words; the public URLs stand in.
+            const imageUrls = serializeAttachments(message.attachments)
+              .map((attachment) => attachment.url)
+              .filter((url) => /^https?:\/\//i.test(url));
+            const words = message.body || (imageUrls.length ? ATTACHMENT_PLACEHOLDER : '');
+            const chars = Array.from([words, ...imageUrls].filter(Boolean).join('\n'));
             const parts: string[] = [];
             while (chars.length) parts.push(chars.splice(0, 1700).join(''));
             for (const [partIndex, part] of parts.entries()) {

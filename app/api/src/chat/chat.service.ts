@@ -1,6 +1,6 @@
 import { cursorFilter, encodeCursor } from './history-cursor.js';
 import { randomUUID } from 'node:crypto';
-import { Injectable } from '@nestjs/common';
+import { BadRequestException, Injectable, Logger, Optional } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model, Types } from 'mongoose';
 import { Visitor, VisitorDocument } from './visitor.schema.js';
@@ -15,6 +15,13 @@ import {
   MessageSenderKind,
   ReactionKind,
 } from './message.schema.js';
+import { NotificationsService } from '../notifications/notifications.service.js';
+import { notifyScopeFilter } from '../notifications/notification-recipients.service.js';
+import type { NotifyScope } from '../users/user.schema.js';
+import {
+  ATTACHMENT_PLACEHOLDER,
+  type AttachmentView,
+} from '../attachments/attachment.types.js';
 
 export interface AppendMessageInput {
   conversationId: string;
@@ -22,7 +29,10 @@ export interface AppendMessageInput {
   senderKind: MessageSenderKind;
   senderId?: string | null;
   senderName?: string;
+  /** May be empty when `attachments` is not. */
   body: string;
+  /** Already claimed (AttachmentsService.claim); stored as embedded copies. */
+  attachments?: AttachmentView[];
   externalId?: string;
 }
 
@@ -63,6 +73,8 @@ const MAX_PAGE_SIZE = 100;
 
 @Injectable()
 export class ChatService {
+  private readonly logger = new Logger(ChatService.name);
+
   constructor(
     @InjectModel(Visitor.name)
     private readonly visitorModel: Model<VisitorDocument>,
@@ -70,6 +82,13 @@ export class ChatService {
     private readonly conversationModel: Model<ConversationDocument>,
     @InjectModel(Message.name)
     private readonly messageModel: Model<MessageDocument>,
+    /**
+     * Optional so plain-service unit tests can build a ChatService with three
+     * models, and so the realtime process (which has no bell) can reuse this
+     * class unchanged.
+     */
+    @Optional()
+    private readonly notifications?: NotificationsService,
   ) {}
 
   /**
@@ -259,7 +278,15 @@ export class ChatService {
    * newest messages are the ones always shown, and older ones are fetched as
    * the reader scrolls up.
    */
-  async unreadCounts(siteIds: string[]): Promise<{ unread: number; unassignedUnread: number }> {
+  async unreadCounts(
+    siteIds: string[],
+    options: { userId?: string; notifyScope?: NotifyScope } = {},
+  ): Promise<{
+    unread: number;
+    unassignedUnread: number;
+    /** Conversations waiting on this person, for the tab title. */
+    notificationUnread: number;
+  }> {
     const [result] = await this.conversationModel.aggregate<{
       unread: number; unassignedUnread: number;
     }>([
@@ -273,7 +300,37 @@ export class ChatService {
         ] } },
       } },
     ]).exec();
-    return { unread: result?.unread ?? 0, unassignedUnread: result?.unassignedUnread ?? 0 };
+    return {
+      unread: result?.unread ?? 0,
+      unassignedUnread: result?.unassignedUnread ?? 0,
+      notificationUnread: await this.countNotificationUnread(siteIds, options),
+    };
+  }
+
+  /**
+   * Threads with something waiting for this person: unread for an agent, inside
+   * their own `notifyScope`, across the projects they can open. Counted rather
+   * than summed, because the tab title shows how many conversations need an
+   * answer, not how many messages arrived.
+   */
+  private async countNotificationUnread(
+    siteIds: string[],
+    options: { userId?: string; notifyScope?: NotifyScope },
+  ): Promise<number> {
+    const userId = options.userId;
+
+    // No caller (an internal job) or no project access means nothing to count.
+    if (!userId || siteIds.length === 0 || !Types.ObjectId.isValid(userId)) {
+      return 0;
+    }
+
+    return this.conversationModel
+      .countDocuments({
+        siteId: { $in: siteIds.map((id) => new Types.ObjectId(id)) },
+        unreadForAgent: { $gt: 0 },
+        ...notifyScopeFilter(options.notifyScope, userId),
+      })
+      .exec();
   }
 
   async listMessages(
@@ -310,46 +367,134 @@ export class ChatService {
     };
   }
 
+  /**
+   * Stores one message and moves the conversation's denormalised tail along.
+   *
+   * Three things happen here, in order:
+   * 1. the message is inserted (or, for an external sender such as Telegram,
+   *    the replay of a message we already stored is recognised and returned
+   *    untouched — no conversation update, no notification);
+   * 2. the conversation is updated atomically, with the *pre-image* read from
+   *    the same write, which is what tells us whether this visitor message
+   *    started the thread or revived a closed one;
+   * 3. the bell is told about a real visitor message, never about a replay.
+   *
+   * Notification failures are swallowed: the message has already been stored,
+   * and losing a chime must never look like a failed send.
+   */
   async appendMessage(input: AppendMessageInput): Promise<MessageDocument> {
+    const body = (input.body ?? '').trim();
+    const attachments = (input.attachments ?? []).map((attachment) => ({
+      id: attachment.id,
+      url: attachment.url,
+      mimeType: attachment.mimeType,
+      size: attachment.size,
+      width: attachment.width ?? null,
+      height: attachment.height ?? null,
+      name: attachment.name ?? null,
+    }));
+
+    if (!body && attachments.length === 0) {
+      throw new BadRequestException('Tin nhắn trống.');
+    }
+
     if (input.externalId) {
-      const existing = await this.messageModel.findOne({ externalId: input.externalId }).exec();
+      const existing = await this.messageModel
+        .findOne({ externalId: input.externalId })
+        .exec();
       if (existing) return existing;
     }
+
     const values = {
       conversationId: new Types.ObjectId(input.conversationId),
       siteId: new Types.ObjectId(input.siteId),
       senderKind: input.senderKind,
       senderId: input.senderId ? new Types.ObjectId(input.senderId) : null,
       senderName: input.senderName,
-      body: input.body,
+      body,
+      attachments,
       ...(input.externalId ? { externalId: input.externalId } : {}),
     };
-    const message = input.externalId
-      ? await this.messageModel.findOneAndUpdate({ externalId: input.externalId }, { $setOnInsert: values }, { upsert: true, returnDocument: 'after' }).exec()
-      : await this.messageModel.create(values);
-    if (!message) throw new Error('Message could not be stored');
 
-    const fromVisitor = input.senderKind === 'visitor';
+    let message: MessageDocument | null;
+    let inserted = true;
 
-    const update: Record<string, unknown> = {
-      $set: {
-        lastMessageAt: message.get('createdAt') as Date,
-        lastMessagePreview: input.body.slice(0, PREVIEW_MAX_LENGTH),
-        // An agent writing into the thread has by definition read it.
-        ...(fromVisitor ? {} : { unreadForAgent: 0 }),
-        // A visitor writing again revives a thread an agent had closed, so the
-        // message cannot land in a closed conversation nobody is watching.
-        ...(fromVisitor ? { status: 'open' as ConversationStatus } : {}),
-      },
-    };
-
-    if (fromVisitor) {
-      update.$inc = { unreadForAgent: 1 };
+    try {
+      message = await this.messageModel.create(values);
+    } catch (error: unknown) {
+      // `create` is the insert attempt: a duplicate externalId means another
+      // process (or an earlier attempt) stored this exact message already, so
+      // this call is a replay and must not touch the conversation again.
+      if (!input.externalId || !isDuplicateKeyError(error)) throw error;
+      inserted = false;
+      message = await this.messageModel
+        .findOne({ externalId: input.externalId })
+        .exec();
     }
 
-    await this.conversationModel
-      .updateOne({ _id: message.conversationId }, update)
-      .exec();
+    if (!message) throw new Error('Message could not be stored');
+
+    // A replay changes nothing: the conversation tail was already moved by the
+    // insert that won, and re-applying it would count the same visitor message
+    // twice and reopen a thread an agent has since closed.
+    if (!inserted) return message;
+
+    const createdAt = message.get('createdAt') as Date;
+    const preview = (body || ATTACHMENT_PLACEHOLDER).slice(0, PREVIEW_MAX_LENGTH);
+    const conversationId = new Types.ObjectId(input.conversationId);
+
+    // The pre-image: `assignedAgentId`, `visitorId` and `status` as they were
+    // before this message, which is exactly what "was it closed / had the
+    // visitor ever written?" needs. One write, no read-then-write race.
+    //
+    // The message is already stored: a failed tail update is logged, not
+    // thrown, so callers never treat a stored message as a failed send (and,
+    // e.g., hand its attachments back for reuse).
+    let previous: ConversationDocument | null;
+    try {
+      previous = await this.conversationModel
+        .findOneAndUpdate(
+          { _id: conversationId },
+          conversationTailUpdate(input.senderKind, createdAt, preview),
+          { returnDocument: 'before', updatePipeline: true },
+        )
+        .exec();
+    } catch (error: unknown) {
+      this.logger.warn(
+        `Message ${String(message._id)} stored but conversation tail not updated: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+      return message;
+    }
+
+    if (
+      input.senderKind !== 'visitor' ||
+      !previous ||
+      !this.notifications
+    ) {
+      return message;
+    }
+
+    const startsConversation =
+      previous.status === 'closed' ||
+      (previous.status === 'open' && previous.lastVisitorMessageAt == null);
+
+    try {
+      await this.notifications.onVisitorMessage({
+        conversation: previous,
+        messageId: String(message._id),
+        preview,
+        createdAt,
+        startsConversation,
+      });
+    } catch (error: unknown) {
+      this.logger.warn(
+        `Visitor message ${String(message._id)} not notified: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
 
     return message;
   }
@@ -443,6 +588,41 @@ export class ChatService {
   }
 
   /**
+   * The visitor's widget is open and the tab is visible, so they have seen
+   * whatever the agent sent. The missed-chat scheduler reads this to avoid
+   * emailing somebody who is looking at the thread right now.
+   */
+  async markReadByVisitor(conversationId: string): Promise<void> {
+    if (!Types.ObjectId.isValid(conversationId)) {
+      return;
+    }
+
+    await this.conversationModel
+      .updateOne(
+        { _id: new Types.ObjectId(conversationId) },
+        { $set: { visitorLastReadAt: new Date() } },
+      )
+      .exec();
+  }
+
+  /**
+   * The visitor was already emailed about the current reply streak by another
+   * path (a ticket answer), so the scheduler must not mail the same words again.
+   */
+  async markVisitorEmailed(conversationId: string): Promise<void> {
+    if (!Types.ObjectId.isValid(conversationId)) {
+      return;
+    }
+
+    await this.conversationModel
+      .updateOne(
+        { _id: new Types.ObjectId(conversationId), visitorEmailedAt: null },
+        { $set: { visitorEmailedAt: new Date() } },
+      )
+      .exec();
+  }
+
+  /**
    * Claiming only succeeds while the thread is free, so two agents pressing
    * "nhận" at the same moment cannot both win — the second gets null back.
    * Passing `expectUnassigned: false` reassigns regardless, which is what an
@@ -502,4 +682,102 @@ export class ChatService {
     }
     return this.visitorModel.findById(id).exec();
   }
+
+  /**
+   * Look a visitor up by the key their browser kept, without creating one.
+   *
+   * `resolveVisitor` above is the write path and mints a row for an unknown key;
+   * this is the read path, used when the caller only wants to know whether an
+   * old session can be reattached.
+   */
+  async findVisitorByKey(
+    siteId: string,
+    visitorKey: string,
+  ): Promise<VisitorDocument | null> {
+    if (!Types.ObjectId.isValid(siteId) || !visitorKey) {
+      return null;
+    }
+
+    return this.visitorModel
+      .findOne({
+        siteId: new Types.ObjectId(siteId),
+        visitorKey,
+      })
+      .exec();
+  }
+}
+
+/**
+ * The conversation's tail, as one update pipeline so the pre-image and the
+ * write are the same operation.
+ *
+ * - A visitor message revives a closed thread, increments the agent badge and
+ *   restarts the unanswered streak (`firstUnansweredAgentAt` cleared,
+ *   `visitorEmailedAt` cleared because the streak it dates is over).
+ * - An agent message means the thread has been read, ends the missed-chat
+ *   streak (`missedNotifiedAt` cleared) and opens a new one only when there is
+ *   no streak running already — `$ifNull` keeps the first reply's timestamp.
+ * - A system note ("closed by X") moves the preview, and — like any write into
+ *   the thread — clears the agent badge; it is not an answer and not a
+ *   question, so no streak timestamp moves.
+ */
+function conversationTailUpdate(
+  senderKind: MessageSenderKind,
+  createdAt: Date,
+  preview: string,
+): Record<string, unknown>[] {
+  const base: Record<string, unknown> = {
+    lastMessageAt: createdAt,
+    // `$literal`: the preview is the message's own words, so one starting with
+    // "$" ("$100 giảm giá") must be stored as text, not evaluated as a field
+    // path / aggregation expression. Everything else in the pipeline is a real
+    // expression or comes from our own enums.
+    lastMessagePreview: { $literal: preview },
+    lastMessageSenderKind: { $literal: senderKind },
+  };
+
+  if (senderKind === 'visitor') {
+    return [
+      {
+        $set: {
+          ...base,
+          status: 'open' as ConversationStatus,
+          unreadForAgent: { $add: [{ $ifNull: ['$unreadForAgent', 0] }, 1] },
+          lastVisitorMessageAt: createdAt,
+          firstUnansweredAgentAt: null,
+          visitorEmailedAt: null,
+        },
+      },
+    ];
+  }
+
+  if (senderKind === 'agent') {
+    return [
+      {
+        $set: {
+          ...base,
+          // An agent writing into the thread has by definition read it.
+          unreadForAgent: 0,
+          lastAgentMessageAt: createdAt,
+          missedNotifiedAt: null,
+          firstUnansweredAgentAt: { $ifNull: ['$firstUnansweredAgentAt', createdAt] },
+        },
+      },
+    ];
+  }
+
+  // A system note keeps the old rule: whoever wrote it was looking at the
+  // thread, so it is not left with an agent badge. It starts and ends no
+  // streak, so none of the scheduler's timestamps move.
+  return [{ $set: { ...base, unreadForAgent: 0 } }];
+}
+
+/** Mongo's duplicate-key error code; the only error `create` may be retried on. */
+function isDuplicateKeyError(error: unknown): boolean {
+  return (
+    typeof error === 'object' &&
+    error !== null &&
+    'code' in error &&
+    (error as { code?: unknown }).code === 11000
+  );
 }

@@ -1,4 +1,4 @@
-import { IsOptional, IsString, Matches, MaxLength } from 'class-validator';
+import { IsOptional, IsBoolean, IsString, Matches, MaxLength } from 'class-validator';
 
 export class CreateWidgetSessionDto {
   @IsString()
@@ -10,4 +10,13 @@ export class CreateWidgetSessionDto {
   @IsString()
   @MaxLength(64)
   visitorKey?: string;
+
+  /**
+   * "Reattach me or tell me there is nothing." With this set, a missing or
+   * unknown `visitorKey` answers `{ resumed: false }` and creates no visitor and
+   * no conversation, so a widget can poll it without minting rows.
+   */
+  @IsOptional()
+  @IsBoolean()
+  resumeOnly?: boolean;
 }

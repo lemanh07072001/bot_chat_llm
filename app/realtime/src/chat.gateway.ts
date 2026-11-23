@@ -1,4 +1,4 @@
-import { Logger } from '@nestjs/common';
+import { HttpException, Logger, Optional } from '@nestjs/common';
 import {
   ConnectedSocket,
   MessageBody,
@@ -21,11 +21,25 @@ import { WidgetService } from './shared/widget/widget.service.js';
 import { SitesService } from './shared/sites/sites.service.js';
 import { UsersService } from './shared/users/users.service.js';
 import { agentProfileOf, type AgentProfile } from './shared/users/user.schema.js';
+import {
+  isAgentStatus,
+  normalizeAgentStatus,
+  type AgentStatus,
+  type TeamStatus,
+} from './shared/users/agent-status.js';
 import { AgentRegistryService } from './shared/realtime/agent-registry.service.js';
+import { VisitorRegistryService } from './shared/realtime/visitor-registry.service.js';
 import { RealtimeBusService } from './shared/realtime/realtime-bus.service.js';
+import { RedisBridgeService } from './shared/realtime/redis-bridge.service.js';
 import { RateLimiterService } from './shared/realtime/rate-limiter.service.js';
-import { conversationRoom, siteRoom, siteVisitorsRoom } from './shared/realtime/rooms.js';
+import { conversationRoom, siteRoom, siteVisitorsRoom, userRoom, visitorRoom } from './shared/realtime/rooms.js';
 import type { JwtPayload } from './shared/auth/jwt-payload.type.js';
+import {
+  AttachmentsService,
+  INVALID_ATTACHMENT_MESSAGE,
+  TOO_MANY_ATTACHMENTS_MESSAGE,
+} from './shared/attachments/attachments.service.js';
+import { MAX_ATTACHMENTS, type AttachmentView } from './shared/attachments/attachment.types.js';
 
 /**
  * A public widget can be driven by anyone, so sends are capped. The key is the
@@ -54,6 +68,8 @@ interface AgentSocketData {
   userId: string;
   tokenVersion: number;
   name: string;
+  /** What this person told visitors at handshake; changes come over the socket. */
+  agentStatus: AgentStatus;
 }
 
 type SocketData = VisitorSocketData | AgentSocketData;
@@ -67,6 +83,7 @@ export class ChatGateway
   implements OnGatewayInit, OnGatewayConnection, OnGatewayDisconnect
 {
   private readonly logger = new Logger(ChatGateway.name);
+  private readonly presenceRevisions = new Map<string, number>();
 
   @WebSocketServer()
   private readonly server!: Server;
@@ -78,16 +95,18 @@ export class ChatGateway
     private readonly usersService: UsersService,
     private readonly jwtService: JwtService,
     private readonly agents: AgentRegistryService,
+    private readonly visitors: VisitorRegistryService,
     private readonly bus: RealtimeBusService,
     private readonly rateLimiter: RateLimiterService,
+    private readonly attachmentsService: AttachmentsService,
+    @Optional() private readonly bridge?: RedisBridgeService,
   ) {}
 
   /** Hands the server to the bus so REST routes can broadcast too. */
   afterInit(server: Server): void {
     this.bus.setServer(server);
-    this.agents.onPresenceChanged((siteId) => this.announcePresence([siteId]));
+    this.agents.onPresenceChanged((siteId) => { void this.announcePresence([siteId]); });
   }
-
   async handleConnection(socket: Socket): Promise<void> {
     const token: unknown = socket.handshake.auth?.token;
 
@@ -130,14 +149,20 @@ export class ChatGateway
 
     if (identity.kind === 'visitor') {
       await socket.join(conversationRoom(identity.conversationId));
+      // Every socket of one visitor, without the agents watching the thread.
+      await socket.join(visitorRoom(identity.conversationId));
       // One room per project for presence, so "nhân viên đang trực" reaches
       // every open widget of a project with a single emit.
       await socket.join(siteVisitorsRoom(identity.siteId));
 
+      // Presence is what decides whether a push is worth sending, so it is
+      // tracked per socket and collapsed per conversation on read.
+      this.visitors.register(socket.id, identity.conversationId);
+
       socket.emit('ready', {
         kind: 'visitor',
         conversationId: identity.conversationId,
-        agentsOnline: this.agents.isAnyoneOnlineForSite(identity.siteId),
+        ...(await this.presenceFor(identity.siteId)),
       });
       return;
     }
@@ -151,14 +176,32 @@ export class ChatGateway
       await socket.join(siteRoom(siteId));
     }
 
-    this.agents.register(identity.userId, siteIds, socket);
-    this.announcePresence(siteIds);
+    // The bell and "assigned to you" are addressed to a person, not a project,
+    // so they arrive whichever inbox this tab happens to have open.
+    await socket.join(userRoom(identity.userId));
 
-    socket.emit('ready', { kind: 'agent', userId: identity.userId, siteIds });
+    // Another tab may have changed the status while this handshake awaited; its
+    // sessions hold the current value, the token-time snapshot does not.
+    const agentStatus = this.agents.statusForUser(identity.userId) ?? identity.agentStatus;
+
+    this.agents.register(identity.userId, siteIds, socket, agentStatus);
+    await this.announcePresence(siteIds);
+
+    socket.emit('ready', {
+      kind: 'agent',
+      userId: identity.userId,
+      siteIds,
+      agentStatus,
+    });
   }
 
   handleDisconnect(socket: Socket): void {
     const data = socket.data as SocketData | undefined;
+
+    if (data?.kind === 'visitor') {
+      this.visitors.unregister(socket.id);
+      return;
+    }
 
     if (data?.kind !== 'agent') {
       return;
@@ -169,7 +212,7 @@ export class ChatGateway
     const siteIds = this.agents.siteIdsForSocket(socket.id);
 
     this.agents.unregister(socket.id);
-    this.announcePresence(siteIds);
+    void this.announcePresence(siteIds);
   }
 
   /** Resolves a handshake token to either a visitor or a staff identity. */
@@ -205,6 +248,7 @@ export class ChatGateway
         tokenVersion: user.tokenVersion ?? 0,
         name: user.name,
         profile: agentProfileOf(user),
+        agentStatus: normalizeAgentStatus(user.agentStatus),
       };
     } catch {
       return null;
@@ -230,8 +274,17 @@ export class ChatGateway
     }
 
     const body = this.readBody(payload);
+    const attachmentIds = this.readAttachmentIds(payload);
 
-    if (!body) {
+    if (attachmentIds === null) {
+      return { ok: false, error: INVALID_ATTACHMENT_MESSAGE };
+    }
+
+    if (attachmentIds.length > MAX_ATTACHMENTS) {
+      return { ok: false, error: TOO_MANY_ATTACHMENTS_MESSAGE };
+    }
+
+    if (!body && attachmentIds.length === 0) {
       return { ok: false, error: 'Message body is required' };
     }
 
@@ -264,14 +317,42 @@ export class ChatGateway
       return { ok: false, error: 'Conversation not found' };
     }
 
-    const message = await this.chatService.appendMessage({
-      conversationId,
-      siteId,
-      senderKind: data.kind,
-      senderId: data.kind === 'visitor' ? data.visitorId : data.userId,
-      senderName: data.kind === 'agent' ? data.name : undefined,
-      body,
-    });
+    // Claimed only after the access checks, with the owner taken from the
+    // socket identity, so nobody can attach somebody else's upload.
+    let attachments: AttachmentView[];
+    let claimedAt: Date;
+    try {
+      ({ attachments, claimedAt } = await this.attachmentsService.claimWithStamp(
+        attachmentIds,
+        data.kind === 'visitor'
+          ? { kind: 'visitor', id: data.visitorId, siteId, conversationId }
+          : { kind: 'agent', id: data.userId, siteId },
+      ));
+    } catch (error) {
+      return { ok: false, error: this.errorMessage(error, INVALID_ATTACHMENT_MESSAGE) };
+    }
+
+    // `appendMessage` only throws when the message itself was not stored (a
+    // failed tail update after the insert is logged inside it), so releasing
+    // the claim below never frees images a stored message already shows.
+    let message: Awaited<ReturnType<ChatService['appendMessage']>>;
+    try {
+      message = await this.chatService.appendMessage({
+        conversationId,
+        siteId,
+        senderKind: data.kind,
+        senderId: data.kind === 'visitor' ? data.visitorId : data.userId,
+        senderName: data.kind === 'agent' ? data.name : undefined,
+        body,
+        attachments,
+      });
+    } catch (error) {
+      await this.attachmentsService
+        .release(attachments.map((attachment) => attachment.id), claimedAt)
+        .catch(() => undefined);
+      this.logger.warn(`message:send failed: ${error instanceof Error ? error.message : String(error)}`);
+      return { ok: false, error: this.errorMessage(error, 'Không gửi được tin nhắn.') };
+    }
 
     const serialized = {
       ...(message.toJSON() as unknown as Record<string, unknown>),
@@ -435,6 +516,26 @@ export class ChatGateway
     return { ok: true };
   }
 
+  /**
+   * The visitor's widget is open and the document is visible. Only the visitor
+   * can say this, and only for the conversation its token was minted for, so
+   * the conversation comes from the socket identity and never the payload.
+   */
+  @SubscribeMessage('visitor:read')
+  async handleVisitorRead(
+    @ConnectedSocket() socket: Socket,
+  ): Promise<{ ok: boolean }> {
+    const data = socket.data as SocketData | undefined;
+
+    if (data?.kind !== 'visitor') {
+      return { ok: false };
+    }
+
+    await this.chatService.markReadByVisitor(data.conversationId);
+
+    return { ok: true };
+  }
+
   @SubscribeMessage('conversation:leave')
   async handleConversationLeave(
     @ConnectedSocket() socket: Socket,
@@ -533,15 +634,96 @@ export class ChatGateway
       });
   }
 
-  /** Tells each project's open widgets whether anybody is there to answer. */
-  private announcePresence(siteIds: string[]): void {
-    for (const siteId of siteIds) {
-      this.server
-        .to(siteVisitorsRoom(siteId))
-        .emit('presence', {
-          agentsOnline: this.agents.isAnyoneOnlineForSite(siteId),
-        });
+  /**
+   * An agent picked Online / Bận / Vắng. The choice belongs to the person, so it
+   * is saved on the user and applied to every tab they have open.
+   */
+  @SubscribeMessage('agent:status')
+  async handleAgentStatus(
+    @ConnectedSocket() socket: Socket,
+    @MessageBody() payload: unknown,
+  ): Promise<{ ok: true; status: AgentStatus } | { ok: false; error: string }> {
+    const data = socket.data as SocketData | undefined;
+
+    if (data?.kind !== 'agent') {
+      return { ok: false, error: 'Not authenticated' };
     }
+
+    const status =
+      typeof payload === 'object' && payload !== null && 'status' in payload
+        ? (payload as { status: unknown }).status
+        : undefined;
+
+    if (!isAgentStatus(status)) {
+      return { ok: false, error: 'Trạng thái không hợp lệ' };
+    }
+
+    try {
+      const saved = await this.usersService.setAgentStatus(data.userId, status);
+
+      if (!saved) {
+        return { ok: false, error: 'Không tìm thấy tài khoản' };
+      }
+
+      // Fires onPresenceChanged for each of the person's projects, which
+      // re-announces the team status to their open widgets.
+      this.agents.setUserStatus(data.userId, saved);
+      this.bus.emitToUser(data.userId, 'agent:status:changed', {
+        userId: data.userId,
+        status: saved,
+      });
+
+      return { ok: true, status: saved };
+    } catch (error) {
+      this.logger.error(
+        `agent:status failed: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      return { ok: false, error: 'Không đổi được trạng thái.' };
+    }
+  }
+
+  /** The best status across every connected agent of a project, all processes included. */
+  private async teamStatusForSite(siteId: string): Promise<TeamStatus> {
+    if (!this.bridge) {
+      return this.agents.teamStatusForSite(siteId);
+    }
+
+    return this.bridge
+      .teamStatusForSite(siteId)
+      .catch(() => this.agents.teamStatusForSite(siteId));
+  }
+
+  private async presenceFor(
+    siteId: string,
+  ): Promise<{ agentsOnline: boolean; teamStatus: TeamStatus }> {
+    const teamStatus = await this.teamStatusForSite(siteId);
+
+    return { agentsOnline: teamStatus !== 'offline', teamStatus };
+  }
+
+  /** Tells each project's open widgets whether anybody is there to answer, and how. */
+  private async announcePresence(siteIds: string[]): Promise<void> {
+    await Promise.all(
+      siteIds.map(async (siteId) => {
+        // Answers can come back out of order; only the newest may be sent.
+        const revision = (this.presenceRevisions.get(siteId) ?? 0) + 1;
+        this.presenceRevisions.set(siteId, revision);
+
+        try {
+          const presence = await this.presenceFor(siteId);
+
+          if (this.presenceRevisions.get(siteId) !== revision) {
+            return;
+          }
+
+          this.server.to(siteVisitorsRoom(siteId)).emit('presence', presence);
+        } catch (error) {
+          this.logger.warn(
+            `presence for ${siteId} failed: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
+      }),
+    );
   }
 
   private consumeSendQuota(data: SocketData): boolean {
@@ -559,28 +741,58 @@ export class ChatGateway
     return allowed;
   }
 
-  private readBody(payload: unknown): string | null {
+  /** '' when absent or blank; an image-only message has no text. */
+  private readBody(payload: unknown): string {
     if (
       typeof payload !== 'object' ||
       payload === null ||
       !('body' in payload)
     ) {
-      return null;
+      return '';
     }
 
     const raw = (payload as { body: unknown }).body;
 
     if (typeof raw !== 'string') {
+      return '';
+    }
+
+    return raw.trim().slice(0, MESSAGE_MAX_LENGTH);
+  }
+
+  /** [] when absent; null when malformed (not an array of non-empty strings). */
+  private readAttachmentIds(payload: unknown): string[] | null {
+    if (
+      typeof payload !== 'object' ||
+      payload === null ||
+      !('attachmentIds' in payload)
+    ) {
+      return [];
+    }
+
+    const raw = (payload as { attachmentIds: unknown }).attachmentIds;
+
+    if (raw === undefined || raw === null) {
+      return [];
+    }
+
+    if (!Array.isArray(raw) || raw.some((id) => typeof id !== 'string' || !id)) {
       return null;
     }
 
-    const trimmed = raw.trim();
+    return raw as string[];
+  }
 
-    if (!trimmed) {
-      return null;
+  /** Client-safe text of a Nest HTTP exception (claim/append errors). */
+  private errorMessage(error: unknown, fallback: string): string {
+    if (error instanceof HttpException && error.getStatus() < 500) {
+      const response = error.getResponse();
+      if (typeof response === 'string') return response;
+      const message = (response as { message?: unknown }).message;
+      if (typeof message === 'string') return message;
+      if (Array.isArray(message) && typeof message[0] === 'string') return message[0];
     }
-
-    return trimmed.slice(0, MESSAGE_MAX_LENGTH);
+    return fallback;
   }
 
   private readConversationId(payload: unknown): string | null {

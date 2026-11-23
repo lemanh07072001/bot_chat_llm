@@ -1,15 +1,32 @@
 import { io, type Socket } from 'socket.io-client';
-import { createSession, fetchOlderMessages, fetchRecentMessages, saveContact, fetchAvailability } from './api.js';
+import {
+  createSession,
+  fetchOlderMessages,
+  fetchRecentMessages,
+  submitTicket,
+  uploadImage,
+  fetchAvailability,
+  readUnread,
+  resumeSession,
+  unreadKey,
+  writeUnread,
+} from './api.js';
 import type { WidgetMessagePage } from './api.js';
 import { registerEmojiFont, resolveAssetBase } from './emoji-assets.js';
 import { EmojiPicker } from './emoji-picker.js';
+import { WidgetNotificationEffects } from './notification-effects.js';
+import { ATTACHMENT_CLAIMED_ERROR, ATTACHMENT_LABELS, AttachmentTray } from './attachment-tray.js';
+import { IMAGE_ACCEPT_ATTR, safeImageUrl } from './images.js';
 import { STYLES } from './styles.js';
+import { attachTooltips } from './tooltip.js';
 import type {
   AgentProfile,
+  AttachmentView,
   ChatMessage,
   ChatWidgetInstance,
   ChatWidgetOptions,
   MessageReaction,
+  TeamStatus,
   WidgetAvailability,
   WidgetSession,
 } from './types.js';
@@ -23,23 +40,49 @@ const LABELS = {
   placeholder: 'Nhập tin nhắn…',
   connecting: 'Đang kết nối…',
   online: 'Đang trực tuyến',
+  busy: 'Đang bận',
   away: 'Sẽ phản hồi sớm',
+  busyTitle: 'Nhân viên đang bận',
+  awayTitle: 'Nhân viên đang tạm vắng',
+  busyMessage: 'Các nhân viên hiện đang bận. Bạn cứ để lại tin nhắn, chúng tôi sẽ phản hồi sớm.',
+  awayMessage:
+    'Hiện chúng tôi đang tạm vắng. Bạn vui lòng để lại tin nhắn và email để được hỗ trợ khi quay lại.',
   outsideHours: 'Ngoài giờ làm việc',
   offline: 'Đang kết nối lại…',
   loadOlder: 'Xem tin nhắn cũ hơn',
   loadingOlder: 'Đang tải…',
-  contactIntro: 'Để lại email để chúng tôi trả lời bạn khi quay lại nhé.',
+  contactIntro:
+    'Hiện chưa có nhân viên trực. Để lại thông tin, chúng tôi sẽ phản hồi qua email và tại đây.',
   contactName: 'Tên của bạn (không bắt buộc)',
   contactEmail: 'Email',
-  contactSubmit: 'Gửi thông tin',
-  contactThanks: 'Đã nhận thông tin của bạn, chúng tôi sẽ liên hệ sớm.',
+  contactMessage: 'Nội dung cần hỗ trợ',
+  contactSubmit: 'Gửi yêu cầu',
+  contactSending: 'Đang gửi…',
   contactInvalid: 'Email chưa hợp lệ, bạn kiểm tra lại giúp nhé.',
+  contactEmptyMessage: 'Bạn vui lòng nhập nội dung cần hỗ trợ.',
+  contactRateLimited: 'Bạn đã gửi quá nhiều yêu cầu, vui lòng thử lại sau ít phút.',
+  contactFailed: 'Không gửi được yêu cầu, vui lòng thử lại.',
+  contactDone: (number: number) =>
+    `Đã gửi yêu cầu #${number}. Chúng tôi sẽ phản hồi qua email và tại đây.`,
+  contactAgain: 'Gửi yêu cầu khác',
   agentTyping: 'Đang trả lời…',
   defaultTitle: 'Chat',
   failed: 'Không kết nối được dịch vụ chat. Vui lòng thử lại.',
   react: 'Thả cảm xúc',
-  reactMine: 'Bạn đã thả cảm xúc này',
+  reactedBy: 'đã thả',
+  reactorYou: 'Bạn',
+  reactorAgent: 'Nhân viên',
+  reactorVisitor: 'Khách',
+  reactRemove: 'Bấm để gỡ',
+  reactJoin: 'Bấm để thả cùng',
+  reactSwitch: 'Bấm để đổi sang',
 };
+
+/** "A", "A và B", "A, B và C". */
+function joinNames(names: string[]): string {
+  if (names.length <= 1) return names[0] ?? '';
+  return `${names.slice(0, -1).join(', ')} và ${names[names.length - 1]}`;
+}
 
 /**
  * The bar that opens on a message. Deliberately short: these are the six the
@@ -79,6 +122,7 @@ const ICONS = {
   chat: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21 11.5a8.4 8.4 0 0 1-8.5 8.4 9 9 0 0 1-3.8-.8L3 21l1.9-5.1a8.1 8.1 0 0 1-.9-3.7A8.4 8.4 0 0 1 12.5 4 8.4 8.4 0 0 1 21 11.5z" stroke-linecap="round" stroke-linejoin="round"/></svg>',
   close: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18" stroke-linecap="round"/></svg>',
   send: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3.4 20.4l17.4-7.5a1 1 0 0 0 0-1.8L3.4 3.6a1 1 0 0 0-1.4 1.2L4.2 11 14 12l-9.8 1 -2.2 6.2a1 1 0 0 0 1.4 1.2z"/></svg>',
+  image: '<svg viewBox="0 0 24 24" aria-hidden="true" fill="currentColor"><path fill-rule="evenodd" d="M5 4h14a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2zm0 2v9.6l3.3-3.3a1 1 0 0 1 1.4 0l2.8 2.8 1.8-1.8a1 1 0 0 1 1.4 0L19 16.6V6H5zm10 1.5a1.75 1.75 0 1 1 0 3.5 1.75 1.75 0 0 1 0-3.5z"/></svg>',
   smile: '<svg viewBox="0 0 24 24" aria-hidden="true" fill="currentColor"><path fill-rule="evenodd" d="M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18zM9.2 8.1a1.4 1.4 0 1 0 0 2.8 1.4 1.4 0 0 0 0-2.8zm5.6 0a1.4 1.4 0 1 0 0 2.8 1.4 1.4 0 0 0 0-2.8zM8.1 13.4a4 4 0 0 0 7.8 0z"/></svg>',
 };
 
@@ -91,6 +135,9 @@ export class ChatWidget implements ChatWidgetInstance {
   private readonly badge: HTMLSpanElement;
   private readonly titleEl: HTMLDivElement;
   private readonly statusEl: HTMLDivElement;
+  private readonly noticeEl: HTMLDivElement;
+  private readonly noticeTitleEl: HTMLDivElement;
+  private readonly noticeTextEl: HTMLDivElement;
   private readonly body: HTMLDivElement;
   private readonly typingEl: HTMLDivElement;
   private readonly errorEl: HTMLDivElement;
@@ -105,6 +152,21 @@ export class ChatWidget implements ChatWidgetInstance {
   private readonly contactName: HTMLInputElement;
   private readonly contactEmail: HTMLInputElement;
   private readonly contactSend: HTMLButtonElement;
+  private readonly contactMessage: HTMLTextAreaElement;
+  private readonly contactDone: HTMLDivElement;
+  private readonly contactDoneText: HTMLDivElement;
+  private readonly contactAgain: HTMLButtonElement;
+  private readonly composer: HTMLDivElement;
+  private readonly attachButton: HTMLButtonElement;
+  private readonly attachInput: HTMLInputElement;
+  private readonly contactAttachButton: HTMLButtonElement;
+  private readonly contactAttachInput: HTMLInputElement;
+  /** Images waiting to go out with the next chat message. */
+  private readonly chatTray: AttachmentTray;
+  /** Images waiting to go out with the ticket form. */
+  private readonly ticketTray: AttachmentTray;
+  /** True while a message carrying images waits for its ack. */
+  private sendingMessage = false;
 
   /**
    * Everyone the widget has been told about, by id. Messages only carry a
@@ -121,6 +183,8 @@ export class ChatWidget implements ChatWidgetInstance {
   private session: WidgetSession | null = null;
   private socket: Socket | null = null;
   private bootstrapping: Promise<void> | null = null;
+  /** The silent "are you still there?" attempt started on page load. */
+  private backgroundResume: Promise<boolean> | null = null;
   private isOpen = false;
   private unread = 0;
   private connected = false;
@@ -129,11 +193,15 @@ export class ChatWidget implements ChatWidgetInstance {
   private hasOlder = false;
   private historyCursor: string | null = null;
   private loadingOlder = false;
-  private contactCaptured = false;
+  /** Number of the ticket just sent; while set, the success box replaces the form. */
+  private submittedTicket: number | null = null;
+  private sendingTicket = false;
   private offlineNoticeShown = false;
   private lastTypingSentAt = 0;
   private typingIdleTimer: ReturnType<typeof setTimeout> | null = null;
   private agentTypingTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Clears the launcher's attention animation class. */
+  private attentionTimer: ReturnType<typeof setTimeout> | null = null;
   private destroyed = false;
   private availabilityTimer: ReturnType<typeof setInterval> | null = null;
   /** Built on the first trigger press, so a visitor who never picks one pays nothing. */
@@ -161,6 +229,10 @@ export class ChatWidget implements ChatWidgetInstance {
 
   private readonly options: ChatWidgetOptions;
 
+  private readonly detachTooltips: () => void;
+  /** Chime + title blink, created once per page. */
+  private readonly effects: WidgetNotificationEffects;
+
   constructor(options: ChatWidgetOptions) {
     this.options = options;
     this.root = this.host.attachShadow({ mode: 'open' });
@@ -180,24 +252,41 @@ export class ChatWidget implements ChatWidgetInstance {
           </div>
           <button class="close" type="button">${ICONS.close}</button>
         </div>
+        <!-- The team's own availability, as a banner rather than a chat row:
+             it is state, not something anyone said. -->
+        <div class="notice" role="status" aria-live="polite" hidden>
+          <div class="notice-title"></div>
+          <div class="notice-text"></div>
+        </div>
         <div class="load-older">
           <button class="load-older-button" type="button"></button>
         </div>
         <div class="body" role="log" aria-live="polite" aria-relevant="additions"></div>
         <div class="typing"></div>
         <div class="error" role="alert"></div>
-        <form class="contact">
+        <form class="contact" novalidate>
           <div class="contact-text"></div>
           <div class="contact-fields">
             <input class="contact-name" type="text" autocomplete="name" />
-            <input class="contact-email" type="email" autocomplete="email" required />
+            <input class="contact-email" type="email" autocomplete="email" maxlength="200" required />
+          </div>
+          <textarea class="contact-message" rows="3" maxlength="2000" required></textarea>
+          <div class="contact-attach-row">
+            <button class="contact-attach" type="button">${ICONS.image}<span class="contact-attach-label"></span></button>
+            <input class="contact-attach-input" type="file" accept="${IMAGE_ACCEPT_ATTR}" multiple hidden />
           </div>
           <button class="contact-send" type="submit"></button>
         </form>
+        <div class="contact-done" role="status" aria-live="polite">
+          <div class="contact-done-text"></div>
+          <button class="contact-again" type="button"></button>
+        </div>
         <!-- display:contents keeps the picker a flex item of the card, which
              is the layout .emoji-picker is written for. -->
         <div class="emoji-host" style="display: contents"></div>
         <div class="composer">
+          <button class="attach-trigger" type="button">${ICONS.image}</button>
+          <input class="attach-input" type="file" accept="${IMAGE_ACCEPT_ATTR}" multiple hidden />
           <button class="emoji-trigger" type="button" aria-expanded="false" data-emoji-trigger>${ICONS.smile}</button>
           <textarea class="input" rows="1"></textarea>
           <button class="send" type="button" disabled>${ICONS.send}</button>
@@ -214,6 +303,9 @@ export class ChatWidget implements ChatWidgetInstance {
     this.badge = this.must('.badge');
     this.titleEl = this.must('.title');
     this.statusEl = this.must('.status');
+    this.noticeEl = this.must('.notice');
+    this.noticeTitleEl = this.must('.notice-title');
+    this.noticeTextEl = this.must('.notice-text');
     this.body = this.must('.body');
     this.typingEl = this.must('.typing');
     this.errorEl = this.must('.error');
@@ -228,9 +320,44 @@ export class ChatWidget implements ChatWidgetInstance {
     this.contactName = this.must('.contact-name');
     this.contactEmail = this.must('.contact-email');
     this.contactSend = this.must('.contact-send');
+    this.contactMessage = this.must('.contact-message');
+    this.contactDone = this.must('.contact-done');
+    this.contactDoneText = this.must('.contact-done-text');
+    this.contactAgain = this.must('.contact-again');
+    this.composer = this.must('.composer');
+    this.attachButton = this.must('.attach-trigger');
+    this.attachInput = this.must('.attach-input');
+    this.contactAttachButton = this.must('.contact-attach');
+    this.contactAttachInput = this.must('.contact-attach-input');
+
+    this.chatTray = new AttachmentTray(
+      this.uploadForVisitor,
+      () => this.updateSendState(),
+      (text) => this.showError(text),
+    );
+    this.ticketTray = new AttachmentTray(
+      this.uploadForVisitor,
+      () => this.updateContactSendState(),
+      (text) => this.showError(text),
+    );
+    this.chatTray.element.classList.add('attach-tray-chat');
+    this.composer.before(this.chatTray.element);
+    this.must('.contact-attach-row').after(this.ticketTray.element);
 
     this.applyLabels();
     this.bindEvents();
+    this.detachTooltips = attachTooltips(this.root);
+    this.effects = new WidgetNotificationEffects({
+      sound: this.options.notifySound !== false,
+      title: this.options.notifyTitle !== false,
+    });
+
+    // A count from an earlier page view survives the reload; the panel is not
+    // opened on its own, so it is the only thing telling the visitor there is
+    // something waiting.
+    this.restoreUnread();
+    window.addEventListener('storage', this.onStorage);
+    document.addEventListener('visibilitychange', this.onVisibilityChange);
 
     // Registered here, once per page: adding the face costs nothing (no
     // download until a matching glyph is painted), and doing it only when the
@@ -240,6 +367,10 @@ export class ChatWidget implements ChatWidgetInstance {
     void registerEmojiFont(this.assetBase()).catch(() => undefined);
 
     (this.options.target ?? document.body).appendChild(this.host);
+
+    // Only a visitor we already know is worth re-attaching: a first-timer
+    // stays lazy, and no session is created until they open the chat.
+    void this.resumeInBackground();
   }
 
   private must<T extends Element>(selector: string): T {
@@ -258,6 +389,9 @@ export class ChatWidget implements ChatWidgetInstance {
     this.sendButton.setAttribute('aria-label', LABELS.send);
     this.emojiTrigger.setAttribute('aria-label', LABELS.emojiPicker);
     this.emojiTrigger.title = LABELS.emojiPicker;
+    this.attachButton.setAttribute('aria-label', ATTACHMENT_LABELS.attach);
+    this.attachButton.title = ATTACHMENT_LABELS.attach;
+    this.must('.contact-attach-label').textContent = ATTACHMENT_LABELS.attach;
     this.input.setAttribute('aria-label', LABELS.placeholder);
     this.input.placeholder = LABELS.placeholder;
     this.titleEl.textContent = this.options.title ?? LABELS.defaultTitle;
@@ -267,7 +401,10 @@ export class ChatWidget implements ChatWidgetInstance {
     this.contactName.setAttribute('aria-label', LABELS.contactName);
     this.contactEmail.placeholder = LABELS.contactEmail;
     this.contactEmail.setAttribute('aria-label', LABELS.contactEmail);
+    this.contactMessage.placeholder = LABELS.contactMessage;
+    this.contactMessage.setAttribute('aria-label', LABELS.contactMessage);
     this.contactSend.textContent = LABELS.contactSubmit;
+    this.contactAgain.textContent = LABELS.contactAgain;
   }
 
   private bindEvents(): void {
@@ -306,12 +443,61 @@ export class ChatWidget implements ChatWidgetInstance {
 
     this.emojiTrigger.addEventListener('click', () => this.toggleEmojiPicker());
 
+    this.attachButton.addEventListener('click', () => this.attachInput.click());
+    this.attachInput.addEventListener('change', () => {
+      if (this.attachInput.files && !this.input.disabled) {
+        this.chatTray.addFiles([...this.attachInput.files]);
+      }
+      this.attachInput.value = '';
+    });
+    this.contactAttachButton.addEventListener('click', () => this.contactAttachInput.click());
+    this.contactAttachInput.addEventListener('change', () => {
+      if (this.contactAttachInput.files && !this.sendingTicket) {
+        this.ticketTray.addFiles([...this.contactAttachInput.files]);
+      }
+      this.contactAttachInput.value = '';
+    });
+    this.input.addEventListener('paste', (event) => {
+      if (this.input.disabled) return;
+      this.pasteImages(event, this.chatTray);
+    });
+    this.contactMessage.addEventListener('paste', (event) => {
+      if (this.sendingTicket) return;
+      this.pasteImages(event, this.ticketTray);
+    });
+    this.panel.addEventListener('dragover', (event) => {
+      if (!event.dataTransfer?.types.includes('Files')) return;
+      event.preventDefault();
+      event.dataTransfer.dropEffect = this.dropTray(event) ? 'copy' : 'none';
+      this.panel.classList.add('dragging');
+    });
+    this.panel.addEventListener('dragleave', (event) => {
+      const next = event.relatedTarget as Node | null;
+      if (!next || !this.panel.contains(next)) this.panel.classList.remove('dragging');
+    });
+    this.panel.addEventListener('drop', (event) => {
+      this.panel.classList.remove('dragging');
+      if (!event.dataTransfer?.types.includes('Files')) return;
+      event.preventDefault();
+      const tray = this.dropTray(event);
+      if (tray && event.dataTransfer.files.length) tray.addFiles([...event.dataTransfer.files]);
+    });
+
     this.sendButton.addEventListener('click', () => void this.send());
     this.loadOlderButton.addEventListener('click', () => void this.loadOlder());
 
     this.contactForm.addEventListener('submit', (event) => {
       event.preventDefault();
       void this.submitContact();
+    });
+    // Once the visitor edits a field it is theirs: prefill never refills it.
+    for (const field of [this.contactName, this.contactEmail]) {
+      field.addEventListener('input', () => { field.dataset.touched = '1'; }, { once: true });
+    }
+    this.contactAgain.addEventListener('click', () => {
+      this.submittedTicket = null;
+      this.reconcileContactForm();
+      if (this.contactForm.classList.contains('visible')) this.contactMessage.focus();
     });
 
     this.panel.addEventListener('keydown', (event) => {
@@ -327,8 +513,66 @@ export class ChatWidget implements ChatWidgetInstance {
    */
   private onDraftChanged(): void {
     this.autoGrow();
-    this.sendButton.disabled = !this.input.value.trim();
+    this.updateSendState();
     this.notifyTyping();
+  }
+
+  /** Uploads one image as the visitor; both trays share it. */
+  private readonly uploadForVisitor = (
+    file: Blob,
+    meta: { name?: string; width?: number; height?: number },
+    onProgress: (fraction: number) => void,
+    signal?: AbortSignal,
+  ): Promise<AttachmentView> => {
+    const token = this.session?.visitorToken;
+
+    if (!token) return Promise.reject(new Error('NO_SESSION'));
+
+    return uploadImage(this.options.apiUrl, token, file, meta, onProgress, signal);
+  };
+
+  /** Send needs text or a finished image, and waits for every upload in flight. */
+  private updateSendState(): void {
+    const hasContent = Boolean(this.input.value.trim()) || this.chatTray.readyIds.length > 0;
+
+    this.sendButton.disabled =
+      this.input.disabled || this.sendingMessage || this.chatTray.isUploading || !hasContent;
+  }
+
+  private updateContactSendState(): void {
+    this.contactSend.disabled = this.sendingTicket || this.ticketTray.isUploading;
+  }
+
+  /** Clipboard images become attachments; pasted text is left alone. */
+  private pasteImages(event: ClipboardEvent, tray: AttachmentTray): void {
+    const data = event.clipboardData;
+
+    if (!data) return;
+
+    const files = [...data.items]
+      .filter((item) => item.kind === 'file' && item.type.startsWith('image/'))
+      .map((item) => item.getAsFile())
+      .filter((file): file is File => file !== null);
+
+    if (files.length === 0) return;
+
+    if (!data.types.includes('text/plain')) event.preventDefault();
+
+    tray.addFiles(files);
+  }
+
+  /** A drop on the ticket form fills its tray; anywhere else, the composer's. */
+  private dropTray(event: DragEvent): AttachmentTray | null {
+    const target = event.target as Node | null;
+    const formOpen = this.contactForm.classList.contains('visible') && !this.sendingTicket;
+
+    if (formOpen && target && this.contactForm.contains(target)) {
+      return this.ticketTray;
+    }
+
+    if (!this.input.disabled) return this.chatTray;
+
+    return formOpen ? this.ticketTray : null;
   }
 
   /** Where the emoji dataset and font live; resolved once, shared by the font and the picker. */
@@ -427,8 +671,14 @@ export class ChatWidget implements ChatWidgetInstance {
     this.launcher.setAttribute('aria-expanded', 'true');
     this.clearUnread();
     // The session (and therefore the visitor record) is created only once the
-    // visitor actually opens the chat, so a plain page view costs nothing.
-    void this.bootstrap().then(() => this.input.focus()).catch(() => {});
+    // visitor actually opens the chat, so a plain page view costs nothing. A
+    // background resume already in flight is awaited rather than repeated.
+    void this.bootstrap()
+      .then(() => {
+        this.input.focus();
+        this.markVisitorRead();
+      })
+      .catch(() => {});
   }
 
   close(): void {
@@ -444,6 +694,10 @@ export class ChatWidget implements ChatWidgetInstance {
   destroy(): void {
     this.destroyed = true;
     if (this.availabilityTimer) clearInterval(this.availabilityTimer);
+    if (this.attentionTimer) clearTimeout(this.attentionTimer);
+    window.removeEventListener('storage', this.onStorage);
+    document.removeEventListener('visibilitychange', this.onVisibilityChange);
+    this.effects.destroy();
     this.socket?.close();
     this.socket = null;
     if (this.typingIdleTimer) clearTimeout(this.typingIdleTimer);
@@ -453,11 +707,14 @@ export class ChatWidget implements ChatWidgetInstance {
     this.picker = null;
     this.closeReactionBar();
     this.reactionsByMessage.clear();
+    this.chatTray.clear();
+    this.ticketTray.clear();
+    this.detachTooltips();
     this.host.remove();
   }
 
   private bootstrap(): Promise<void> {
-    this.bootstrapping ??= this.runBootstrap().catch((error: unknown) => {
+    this.bootstrapping ??= this.attach().catch((error: unknown) => {
       // Allow a later open() to retry rather than wedging on the failed attempt.
       this.bootstrapping = null;
       this.showError(LABELS.failed);
@@ -465,6 +722,37 @@ export class ChatWidget implements ChatWidgetInstance {
     });
 
     return this.bootstrapping;
+  }
+
+  private async attach(): Promise<void> {
+    if (await this.resumeInBackground()) {
+      return;
+    }
+
+    await this.runBootstrap();
+  }
+
+  /**
+   * Re-attaches to the thread of a visitor we already know, so an agent reply
+   * that arrives while the page is open reaches the badge without the panel
+   * being opened. Resolves false — silently — when there is nothing to resume:
+   * no stored key, `{ resumed: false }`, or any network/server problem, in
+   * which case open() creates the session the usual way.
+   */
+  private resumeInBackground(): Promise<boolean> {
+    this.backgroundResume ??= resumeSession(this.options.apiUrl, this.options.publicKey)
+      .then((session) => {
+        if (!session || this.destroyed) {
+          return false;
+        }
+
+        this.adoptSession(session);
+
+        return true;
+      })
+      .catch(() => false);
+
+    return this.backgroundResume;
   }
 
   private async runBootstrap(): Promise<void> {
@@ -477,6 +765,10 @@ export class ChatWidget implements ChatWidgetInstance {
       return;
     }
 
+    this.adoptSession(session);
+  }
+
+  private adoptSession(session: WidgetSession): void {
     this.session = session;
     this.rememberAgents(session.agents);
     // The assignee is who the visitor is waiting on; failing that, the last
@@ -484,12 +776,12 @@ export class ChatWidget implements ChatWidgetInstance {
     this.activeAgent = session.assignedAgent ?? this.lastAgentOf(session.messages);
     this.hasOlder = session.hasMoreMessages;
     this.historyCursor = session.nextMessageCursor;
-    this.contactCaptured = Boolean(session.contact.email);
     this.applySettings(session);
     this.applyAvailability(session.availability);
     this.renderHistory(session.messages);
     this.connectSocket(session.visitorToken);
-    this.availabilityTimer = setInterval(() => {
+
+    this.availabilityTimer ??= setInterval(() => {
       if (!this.isOpen) return;
       void fetchAvailability(this.options.apiUrl, session.visitorToken)
         .then((availability) => { if (!this.destroyed) this.applyAvailability(availability); })
@@ -634,15 +926,20 @@ export class ChatWidget implements ChatWidgetInstance {
 
     this.socket = socket;
 
-    socket.on('ready', (payload: { agentsOnline?: boolean }) => {
+    socket.on('ready', (payload: { agentsOnline?: boolean; teamStatus?: TeamStatus }) => {
       const reconnected = this.hasHandshaked;
       this.hasHandshaked = true;
       this.connected = true;
       this.hideError();
       // The handshake carries presence as it is right now, which is fresher
-      // than whatever the session response said a moment earlier.
-      if (typeof payload?.agentsOnline === 'boolean' && this.availability) {
-        this.applyAvailability({ ...this.availability, agentsOnline: payload.agentsOnline });
+      // than whatever the session response said a moment earlier. It is folded
+      // into the known availability rather than replacing it, so office hours
+      // and the site's wording survive a reconnect.
+      if (
+        (typeof payload?.agentsOnline === 'boolean' || payload?.teamStatus) &&
+        this.availability
+      ) {
+        this.applyAvailability(this.mergePresence(payload));
       } else {
         this.refreshStatus();
       }
@@ -654,6 +951,9 @@ export class ChatWidget implements ChatWidgetInstance {
       if (reconnected) {
         void this.resyncThread();
       }
+
+      // A panel opened before the handshake finished still counts as read.
+      this.markVisitorRead();
     });
 
     // Sent when a member of staff picks the thread up or lets it go, so the
@@ -669,9 +969,9 @@ export class ChatWidget implements ChatWidgetInstance {
 
     socket.on('widget:maintenance', (payload: { maintenance: boolean }) => this.setMaintenance(payload.maintenance));
 
-    socket.on('presence', (payload: { agentsOnline: boolean }) => {
+    socket.on('presence', (payload: { agentsOnline?: boolean; teamStatus?: TeamStatus }) => {
       if (this.availability) {
-        this.applyAvailability({ ...this.availability, agentsOnline: payload.agentsOnline });
+        this.applyAvailability(this.mergePresence(payload));
       }
     });
 
@@ -698,13 +998,29 @@ export class ChatWidget implements ChatWidgetInstance {
         this.setActiveAgent(message.sender);
       }
 
+      // A replayed or already-rendered message must not bump the badge twice;
+      // the row is the dedupe key, and history/resync never reach this path.
+      const duplicate = this.hasRow(message.id);
+
       this.appendMessage(message);
       this.scrollToBottom();
 
-      if (message.senderKind !== 'visitor') {
-        this.hideAgentTyping();
+      if (message.senderKind === 'visitor') {
+        return;
+      }
 
-        if (!this.isOpen) {
+      this.hideAgentTyping();
+
+      if (duplicate) {
+        return;
+      }
+
+      if (message.senderKind === 'agent') {
+        if (this.isOpen && !document.hidden) {
+          // The visitor is reading it right now, so it was read the moment it
+          // arrived: say so, and keep the badge for a later page load empty.
+          this.markVisitorRead();
+        } else {
           this.bumpUnread();
         }
       }
@@ -841,12 +1157,44 @@ export class ChatWidget implements ChatWidgetInstance {
   }
 
   /**
-   * Status and the out-of-hours notice are two views of the same state, so
-   * they are set together whenever availability changes.
+   * The team status the header and the notice are keyed on. An older api sends
+   * no `teamStatus`, and then `agentsOnline` is the whole truth.
+   */
+  private teamStatusOf(availability: WidgetAvailability): TeamStatus {
+    return availability.teamStatus ?? (availability.agentsOnline ? 'online' : 'offline');
+  }
+
+  /**
+   * Presence arrives as a partial update on `ready`/`presence`, so it is folded
+   * into what is already known: a handshake must never wipe the office hours,
+   * the offline wording or the site's messages that came with the session.
+   */
+  private mergePresence(payload: {
+    agentsOnline?: boolean;
+    teamStatus?: TeamStatus;
+  }): WidgetAvailability {
+    const known = this.availability as WidgetAvailability;
+    const teamStatus: TeamStatus =
+      payload.teamStatus ??
+      (typeof payload.agentsOnline === 'boolean'
+        ? payload.agentsOnline
+          ? 'online'
+          : 'offline'
+        : this.teamStatusOf(known));
+    const agentsOnline =
+      typeof payload.agentsOnline === 'boolean' ? payload.agentsOnline : teamStatus !== 'offline';
+
+    return { ...known, agentsOnline, teamStatus };
+  }
+
+  /**
+   * Status, the busy/away notice and the email prompt are views of the same
+   * state, so they are set together whenever availability changes.
    */
   private applyAvailability(availability: WidgetAvailability): void {
     this.availability = availability;
     this.setMaintenance(Boolean(availability.maintenance));
+    this.renderNotice();
     this.refreshStatus();
 
     const outsideHours = !availability.withinOfficeHours;
@@ -857,9 +1205,68 @@ export class ChatWidget implements ChatWidgetInstance {
       this.offlineNoticeShown = true;
     }
 
-    // Asking for an email only makes sense when nobody will answer right now
-    // and the visitor has not already left one.
-    this.contactForm.classList.toggle('visible', outsideHours && !this.contactCaptured && !this.maintenance);
+    this.reconcileContactForm();
+  }
+
+  /**
+   * The banner above the messages, shown only while the team is busy or away.
+   * Maintenance outranks it, and both titles and wording are assigned with
+   * `textContent` because the message is operator-provided text.
+   */
+  private renderNotice(): void {
+    const availability = this.availability;
+    const teamStatus = availability ? this.teamStatusOf(availability) : 'offline';
+    const busy = !this.maintenance && teamStatus === 'busy';
+    const away = !this.maintenance && teamStatus === 'away';
+
+    this.noticeEl.hidden = !busy && !away;
+    this.noticeEl.classList.toggle('notice-busy', busy);
+    this.noticeEl.classList.toggle('notice-away', away);
+
+    if (!busy && !away) {
+      return;
+    }
+
+    const settings = this.session?.settings;
+    this.noticeTitleEl.textContent = busy ? LABELS.busyTitle : LABELS.awayTitle;
+    this.noticeTextEl.textContent = busy
+      ? (availability?.busyMessage || settings?.busyMessage || LABELS.busyMessage)
+      : (availability?.awayMessage || settings?.awayMessage || LABELS.awayMessage);
+  }
+
+  /**
+   * The ticket form only makes sense when nobody will answer right now. A
+   * returning visitor can always leave another request, so an email already on
+   * file does not hide it. Toggling the class keeps whatever they had typed, so
+   * a status change mid-typing loses nothing.
+   */
+  private reconcileContactForm(): void {
+    const availability = this.availability;
+    const outsideHours = availability?.withinOfficeHours === false;
+    const teamStatus = availability ? this.teamStatusOf(availability) : null;
+    const unattended = outsideHours || teamStatus === 'away' || teamStatus === 'offline';
+    const done = this.submittedTicket !== null;
+
+    this.prefillContact();
+    this.contactForm.classList.toggle('visible', unattended && !this.maintenance && !done);
+    this.contactDone.classList.toggle('visible', done && !this.maintenance);
+
+    if (done) {
+      this.contactDoneText.textContent = LABELS.contactDone(this.submittedTicket ?? 0);
+    }
+  }
+
+  /** Fills in what the server already knows, never over what the visitor typed. */
+  private prefillContact(): void {
+    const contact = this.session?.contact;
+
+    if (contact?.name && !this.contactName.value && !this.contactName.dataset.touched) {
+      this.contactName.value = contact.name;
+    }
+
+    if (contact?.email && !this.contactEmail.value && !this.contactEmail.dataset.touched) {
+      this.contactEmail.value = contact.email;
+    }
   }
 
   private refreshStatus(): void {
@@ -874,11 +1281,19 @@ export class ChatWidget implements ChatWidgetInstance {
       return;
     }
 
-    if (this.availability?.agentsOnline) {
+    const teamStatus = this.availability ? this.teamStatusOf(this.availability) : 'offline';
+
+    if (teamStatus === 'online') {
       this.setStatus(LABELS.online);
       return;
     }
 
+    if (teamStatus === 'busy') {
+      this.setStatus(LABELS.busy);
+      return;
+    }
+
+    // Away, and the old "nobody connected" case, read the same to a visitor.
     this.setStatus(LABELS.away);
   }
 
@@ -927,48 +1342,93 @@ export class ChatWidget implements ChatWidgetInstance {
   private async submitContact(): Promise<void> {
     const email = this.contactEmail.value.trim();
     const name = this.contactName.value.trim();
+    const message = this.contactMessage.value.trim();
 
-    if (!this.session || !email) {
+    if (!this.session || this.sendingTicket || this.ticketTray.isUploading) {
       return;
     }
 
+    if (!email || !this.contactEmail.checkValidity() || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      this.showError(LABELS.contactInvalid);
+      this.contactEmail.focus();
+      return;
+    }
+
+    if (!message) {
+      this.showError(LABELS.contactEmptyMessage);
+      this.contactMessage.focus();
+      return;
+    }
+
+    const attachmentIds = this.ticketTray.readyIds;
+
+    this.sendingTicket = true;
     this.contactSend.disabled = true;
+    this.contactSend.textContent = LABELS.contactSending;
+    this.contactAttachButton.disabled = true;
+    this.ticketTray.setDisabled(true);
 
     try {
-      await saveContact(this.options.apiUrl, this.session.visitorToken, {
+      const ticket = await submitTicket(this.options.apiUrl, this.session.visitorToken, {
         ...(name ? { name } : {}),
         email,
+        message,
+        ...(attachmentIds.length ? { attachmentIds } : {}),
       });
 
-      this.contactCaptured = true;
+      this.contactMessage.value = '';
+      this.ticketTray.clear();
       this.session.contact = { name: name || null, email };
-      this.contactForm.classList.remove('visible');
-      this.appendRow('system', LABELS.contactThanks);
-      this.scrollToBottom();
+      this.submittedTicket = ticket.number;
       this.hideError();
-    } catch {
-      this.showError(LABELS.contactInvalid);
+      this.reconcileContactForm();
+    } catch (error) {
+      this.showError(
+        error instanceof Error && error.message === 'RATE_LIMITED'
+          ? LABELS.contactRateLimited
+          : LABELS.contactFailed,
+      );
     } finally {
-      this.contactSend.disabled = false;
+      this.sendingTicket = false;
+      this.contactSend.textContent = LABELS.contactSubmit;
+      this.contactAttachButton.disabled = false;
+      this.ticketTray.setDisabled(false);
+      this.updateContactSendState();
     }
   }
 
   private async send(): Promise<void> {
     const body = this.input.value.trim();
 
-    if (this.maintenance || !body || !this.socket?.connected) {
+    // Images already sent must not ride along a second time, so a send waits
+    // for the previous image send's ack and for every upload in flight.
+    if (this.sendingMessage || this.chatTray.isUploading) {
+      return;
+    }
+
+    const attachmentIds = this.chatTray.readyIds;
+
+    if (this.maintenance || (!body && attachmentIds.length === 0) || !this.socket?.connected) {
       return;
     }
 
     this.input.value = '';
     this.draftSelection = { start: 0, end: 0 };
     this.autoGrow();
+    this.sendingMessage = attachmentIds.length > 0;
     this.sendButton.disabled = true;
     this.stopTyping();
 
-    const ack = (await this.socket.emitWithAck('message:send', { body }).catch(() => null)) as
+    const payload = attachmentIds.length ? { body, attachmentIds } : { body };
+    // A timeout rejects like a failed ack, so a lost reply cannot lock the composer.
+    const ack = (await this.socket
+      .timeout(10000)
+      .emitWithAck('message:send', payload)
+      .catch(() => null)) as
       | { ok: boolean; error?: string }
       | null;
+
+    this.sendingMessage = false;
 
     if (!ack?.ok) {
       // Hand the text back so nothing the visitor typed is silently lost — but
@@ -978,13 +1438,18 @@ export class ChatWidget implements ChatWidgetInstance {
         this.input.value = body;
         this.draftSelection = { start: body.length, end: body.length };
         this.autoGrow();
-        this.sendButton.disabled = false;
       }
 
+      // The images stay in the tray, so a retry sends them again — unless the
+      // server says they were already claimed (the earlier send went through).
+      if (ack?.error === ATTACHMENT_CLAIMED_ERROR) this.chatTray.clearSent(attachmentIds);
+      this.updateSendState();
       this.showError(ack?.error ?? LABELS.failed);
       return;
     }
 
+    this.chatTray.clearSent(attachmentIds);
+    this.updateSendState();
     this.hideError();
   }
 
@@ -1037,9 +1502,15 @@ export class ChatWidget implements ChatWidgetInstance {
   }
 
   private appendMessage(message: ChatMessage): void {
-    if ([...this.body.querySelectorAll<HTMLElement>('[data-message-id]')].some((row) => row.dataset.messageId === message.id)) return;
+    if (this.hasRow(message.id)) return;
     this.body.append(this.buildRow(message));
     this.groupAgentRows();
+  }
+
+  private hasRow(messageId: string): boolean {
+    return [...this.body.querySelectorAll<HTMLElement>('[data-message-id]')].some(
+      (row) => row.dataset.messageId === messageId,
+    );
   }
 
   /**
@@ -1080,11 +1551,12 @@ export class ChatWidget implements ChatWidgetInstance {
     const profile = this.profileFor(message);
     const row = this.createRow(
       message.senderKind,
-      message.body,
+      message.body ?? '',
       // The name stored on the message is the one in force when it was sent,
       // and it outlives the account, so it wins over the live profile.
       message.senderName ?? profile?.name ?? (message.senderKind === 'visitor' ? (this.session?.contact.name || this.session?.contact.email || 'Khách') : 'Nhân viên hỗ trợ'),
       profile,
+      message.attachments,
     );
     row.dataset.createdAt = message.createdAt;
     row.dataset.messageId = message.id;
@@ -1170,18 +1642,26 @@ export class ChatWidget implements ChatWidgetInstance {
 
     // Grouped in first-seen order: the set is tiny, and an order that changes
     // as counts change would make the badges hop under the pointer.
-    const totals = new Map<string, { count: number; mine: boolean }>();
+    const totals = new Map<string, { count: number; mine: boolean; others: string[] }>();
 
     for (const reaction of reactions) {
-      const entry = totals.get(reaction.emoji) ?? { count: 0, mine: false };
+      const entry = totals.get(reaction.emoji) ?? { count: 0, mine: false, others: [] };
       entry.count += 1;
 
       if (reaction.kind === 'visitor' && reaction.id === this.session?.visitorId) {
         entry.mine = true;
+      } else {
+        const name =
+          reaction.kind === 'agent'
+            ? (this.agentsById.get(reaction.id)?.name ?? LABELS.reactorAgent)
+            : LABELS.reactorVisitor;
+        if (!entry.others.includes(name)) entry.others.push(name);
       }
 
       totals.set(reaction.emoji, entry);
     }
+
+    const current = this.myReaction(reactions);
 
     // A repaint must not drop the keyboard user out of the thread, and the badge
     // they were on may have just been removed. Read before the old nodes go, and
@@ -1203,7 +1683,15 @@ export class ChatWidget implements ChatWidgetInstance {
       badge.type = 'button';
       badge.className = entry.mine ? 'reaction-badge mine' : 'reaction-badge';
       badge.dataset.emoji = emoji;
-      badge.title = entry.mine ? LABELS.reactMine : LABELS.react;
+      // Say who left it: an agent's 👍 next to the visitor's own reads as one
+      // count otherwise, and tapping it looks like it misbehaves.
+      const who = joinNames(entry.mine ? [LABELS.reactorYou, ...entry.others] : entry.others);
+      const hint = entry.mine
+        ? LABELS.reactRemove
+        : current
+          ? `${LABELS.reactSwitch} ${emoji}`
+          : LABELS.reactJoin;
+      badge.title = `${who} ${LABELS.reactedBy} ${emoji}\n${hint}`;
       badge.setAttribute('aria-label', `${emoji} ${entry.count}`);
       badge.setAttribute('aria-pressed', String(entry.mine));
 
@@ -1351,14 +1839,30 @@ export class ChatWidget implements ChatWidgetInstance {
     body: string,
     senderName?: string,
     profile?: AgentProfile | null,
+    attachments?: AttachmentView[] | null,
   ): HTMLDivElement {
     const row = document.createElement('div');
     row.className = `row from-${kind}`;
 
     const bubble = document.createElement('div');
     bubble.className = 'bubble';
-    // textContent, so message text can never be parsed as markup.
-    bubble.textContent = body;
+    const media = kind === 'system' ? null : this.buildMedia(attachments);
+
+    if (media) {
+      bubble.classList.add('has-media');
+      bubble.append(media);
+
+      if (body) {
+        const text = document.createElement('div');
+        text.className = 'bubble-text';
+        // textContent, so message text can never be parsed as markup.
+        text.textContent = body;
+        bubble.append(text);
+      }
+    } else {
+      // textContent, so message text can never be parsed as markup.
+      bubble.textContent = body;
+    }
 
     if (kind === 'system') {
       row.append(bubble);
@@ -1391,6 +1895,47 @@ export class ChatWidget implements ChatWidgetInstance {
   }
 
   /**
+   * The image grid inside a bubble. Built from DOM nodes only, and any url that
+   * is not plain http(s) is dropped rather than rendered.
+   */
+  private buildMedia(attachments?: AttachmentView[] | null): HTMLDivElement | null {
+    const safe = (Array.isArray(attachments) ? attachments : [])
+      .map((attachment) => ({ attachment, url: safeImageUrl(attachment?.url) }))
+      .filter((entry): entry is { attachment: AttachmentView; url: string } => entry.url !== null)
+      .slice(0, 5);
+
+    if (safe.length === 0) return null;
+
+    const grid = document.createElement('div');
+    grid.className = safe.length === 1 ? 'media-grid single' : 'media-grid multi';
+
+    for (const { attachment, url } of safe) {
+      const link = document.createElement('a');
+      link.className = 'media-item';
+      link.href = url;
+      link.target = '_blank';
+      link.rel = 'noopener noreferrer';
+
+      const img = document.createElement('img');
+      img.loading = 'lazy';
+      img.alt = ATTACHMENT_LABELS.alt;
+      img.referrerPolicy = 'no-referrer';
+      img.src = url;
+
+      if (safe.length === 1 && attachment.width && attachment.height) {
+        // Reserves the space before the bytes arrive, so the thread does not jump.
+        img.width = attachment.width;
+        img.height = attachment.height;
+      }
+
+      link.append(img);
+      grid.append(link);
+    }
+
+    return grid;
+  }
+
+  /**
    * Hides the name and face on an agent message that follows another from the
    * same person, so a burst of replies reads as one turn instead of repeating
    * the same header three times. Re-run after every insert, which keeps it
@@ -1417,7 +1962,11 @@ export class ChatWidget implements ChatWidgetInstance {
     notice.textContent = 'Hệ thống chat đang bảo trì. Vui lòng quay lại sau.';
     notice.hidden = !value;
     this.setComposerEnabled(this.connected);
-    if (value) { this.contactForm.classList.remove('visible'); this.setStatus('Đang bảo trì'); }
+    // Maintenance outranks the team's own status, so the banner is repainted
+    // here rather than only when availability is applied.
+    this.renderNotice();
+    this.reconcileContactForm();
+    if (value) this.setStatus('Đang bảo trì');
     else this.refreshStatus();
   }
 
@@ -1427,8 +1976,10 @@ export class ChatWidget implements ChatWidgetInstance {
     // A locked composer cannot take a glyph, so the trigger is closed off too
     // rather than opening a panel of buttons that do nothing.
     this.emojiTrigger.disabled = !enabled;
+    this.attachButton.disabled = !enabled;
+    this.attachButton.hidden = !enabled;
     if (!enabled) this.closeEmojiPicker();
-    this.sendButton.disabled = !enabled || !this.input.value.trim();
+    this.updateSendState();
   }
 
   private setStatus(text: string): void {
@@ -1447,15 +1998,97 @@ export class ChatWidget implements ChatWidgetInstance {
   }
 
   private bumpUnread(): void {
-    this.unread += 1;
-    this.badge.textContent = this.unread > 9 ? '9+' : String(this.unread);
-    this.badge.classList.add('visible');
+    this.unread = Math.min(99, this.unread + 1);
+    this.paintUnread();
+    writeUnread(this.options.publicKey, this.unread);
+    this.effects.notify(this.unread);
+    this.attractAttention();
   }
 
   private clearUnread(): void {
+    if (this.unread !== 0) {
+      writeUnread(this.options.publicKey, 0);
+    }
+
     this.unread = 0;
     this.badge.classList.remove('visible');
+    this.launcher.classList.remove('attention');
+    this.effects.restoreTitle();
   }
+
+  private paintUnread(): void {
+    this.badge.textContent = this.unread > 9 ? '9+' : String(this.unread);
+    this.badge.classList.toggle('visible', this.unread > 0);
+  }
+
+  private restoreUnread(): void {
+    this.unread = readUnread(this.options.publicKey);
+    this.paintUnread();
+  }
+
+  /**
+   * One short nudge on the launcher. The class is dropped when the animation
+   * ends so a later message can play it again, and the timer is a fallback for
+   * a tab loaded with `prefers-reduced-motion`, where it never runs.
+   */
+  private attractAttention(): void {
+    if (this.attentionTimer) clearTimeout(this.attentionTimer);
+    this.launcher.classList.remove('attention');
+    // Reading offsetWidth restarts the animation instead of merging two bumps.
+    void this.launcher.offsetWidth;
+    this.launcher.classList.add('attention');
+    this.attentionTimer = setTimeout(() => {
+      this.attentionTimer = null;
+      this.launcher.classList.remove('attention');
+    }, 1400);
+  }
+
+  /**
+   * Tells the server the visitor has caught up, which is what stops the admin
+   * workflow from treating a thread the visitor is reading as unanswered. Only
+   * meaningful while the panel is open and on screen; the ack is ignored on
+   * purpose, so a server that does not know the event simply stays quiet.
+   */
+  private markVisitorRead(): void {
+    if (!this.isOpen || document.hidden || !this.socket?.connected) {
+      return;
+    }
+
+    this.socket.emit('visitor:read', {});
+  }
+
+  private readonly onStorage = (event: StorageEvent): void => {
+    if (event.key !== unreadKey(this.options.publicKey)) {
+      return;
+    }
+
+    // Another tab on the same site opened the chat (or bumped its own count):
+    // the badge is one shared number, so this tab follows it.
+    const next = readUnread(this.options.publicKey);
+
+    if (next === this.unread) {
+      return;
+    }
+
+    this.unread = next;
+    this.paintUnread();
+
+    if (next === 0) {
+      this.launcher.classList.remove('attention');
+      this.effects.restoreTitle();
+    }
+  };
+
+  private readonly onVisibilityChange = (): void => {
+    if (document.hidden || !this.isOpen) {
+      return;
+    }
+
+    // Whatever arrived while the tab was away was read the moment the visitor
+    // is looking at an open panel again.
+    this.clearUnread();
+    this.markVisitorRead();
+  };
 
   private autoGrow(): void {
     this.input.style.height = 'auto';

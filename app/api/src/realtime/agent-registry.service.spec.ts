@@ -110,4 +110,83 @@ describe('AgentRegistryService', () => {
     // Still online through the other tab.
     expect(registry.isAnyoneOnlineForSite('site-a')).toBe(true);
   });
+
+  it('reports a project offline when no agent is connected to it', () => {
+    expect(registry.teamStatusForSite('site-a')).toBe('offline');
+  });
+
+  it('takes the best status among the agents of that project', () => {
+    registry.register('user-1', ['site-a'], fakeConnection('socket-1'), 'online');
+    registry.register('user-2', ['site-a'], fakeConnection('socket-2'), 'busy');
+
+    // online beats busy.
+    expect(registry.teamStatusForSite('site-a')).toBe('online');
+
+    registry.setUserStatus('user-1', 'busy');
+
+    // busy beats away.
+    registry.register('user-3', ['site-a'], fakeConnection('socket-3'), 'away');
+    expect(registry.teamStatusForSite('site-a')).toBe('busy');
+  });
+
+  it('ignores agents connected only to other projects', () => {
+    registry.register('user-1', ['site-b'], fakeConnection('socket-1'), 'online');
+
+    expect(registry.teamStatusForSite('site-a')).toBe('offline');
+    expect(registry.siteTeamStatuses()).toEqual({ 'site-b': 'online' });
+  });
+
+  it('defaults an agent registered without a status to online', () => {
+    registry.register('user-1', ['site-a'], fakeConnection('socket-1'));
+
+    expect(registry.statusForUser('user-1')).toBe('online');
+    expect(registry.teamStatusForSite('site-a')).toBe('online');
+  });
+
+  it("applies a person's status to every tab and re-announces their projects", () => {
+    const announced: string[] = [];
+    registry.onPresenceChanged((siteId) => announced.push(siteId));
+
+    registry.register('user-1', ['site-a'], fakeConnection('socket-1'));
+    registry.register('user-1', ['site-a', 'site-b'], fakeConnection('socket-2'));
+    registry.register('user-2', ['site-c'], fakeConnection('socket-3'));
+
+    const covered = registry.setUserStatus('user-1', 'away');
+
+    expect(covered).toEqual(['site-a', 'site-b']);
+    expect(registry.statusForUser('user-1')).toBe('away');
+    expect(registry.teamStatusForSite('site-a')).toBe('away');
+    expect(registry.teamStatusForSite('site-b')).toBe('away');
+    expect(announced).toEqual(['site-a', 'site-b']);
+    // Someone else's session is untouched.
+    expect(registry.statusForUser('user-2')).toBe('online');
+    expect(registry.teamStatusForSite('site-c')).toBe('online');
+  });
+
+  it('has nothing to update for a person with no open socket', () => {
+    const announced: string[] = [];
+    registry.onPresenceChanged((siteId) => announced.push(siteId));
+
+    expect(registry.setUserStatus('user-1', 'busy')).toEqual([]);
+    expect(registry.statusForUser('user-1')).toBeNull();
+    expect(announced).toEqual([]);
+  });
+
+  it('summarises the best status per project for the heartbeat', () => {
+    registry.register('user-1', ['site-a'], fakeConnection('socket-1'), 'busy');
+    registry.register('user-2', ['site-a', 'site-b'], fakeConnection('socket-2'), 'online');
+    registry.register('user-3', ['site-b'], fakeConnection('socket-3'), 'away');
+
+    expect(registry.siteTeamStatuses()).toEqual({
+      'site-a': 'online',
+      'site-b': 'online',
+    });
+
+    registry.setUserStatus('user-2', 'away');
+
+    expect(registry.siteTeamStatuses()).toEqual({
+      'site-a': 'busy',
+      'site-b': 'away',
+    });
+  });
 });

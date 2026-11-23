@@ -4,6 +4,8 @@ import { revalidatePath } from "next/cache";
 import { apiFetch } from "@/lib/api";
 import { getCurrentUser, getToken } from "@/lib/session";
 import {
+  DEFAULT_AWAY_MESSAGE,
+  DEFAULT_BUSY_MESSAGE,
   MAX_ORIGINS,
   TIME_PATTERN,
   findInvalidOrigin,
@@ -43,7 +45,14 @@ async function requireAdminToken(): Promise<
 type SitePayload = {
   name: string;
   allowedOrigins: string[];
-  settings: { title: string; themeColor: string; greeting: string; imageUrl: string };
+  settings: {
+    title: string;
+    themeColor: string;
+    greeting: string;
+    imageUrl: string;
+    busyMessage: string;
+    awayMessage: string;
+  };
   /** Omitted by the create form, which does not ask about a schedule. */
   officeHours?: OfficeHours;
 };
@@ -110,6 +119,10 @@ function readForm(form: FormData): { payload: SitePayload } | { error: string } 
   const greeting = String(form.get("greeting") ?? "").trim();
   const themeColor = String(form.get("themeColor") ?? "").trim();
   const allowedOrigins = parseOrigins(String(form.get("allowedOrigins") ?? ""));
+  // Blank means "use the wording the widget ships with", matching how the api
+  // reads a missing field.
+  const busyMessage = String(form.get("busyMessage") ?? "").trim() || DEFAULT_BUSY_MESSAGE;
+  const awayMessage = String(form.get("awayMessage") ?? "").trim() || DEFAULT_AWAY_MESSAGE;
 
   if (!name || name.length > 100) {
     return { error: "Tên site phải có từ 1 đến 100 ký tự." };
@@ -122,6 +135,12 @@ function readForm(form: FormData): { payload: SitePayload } | { error: string } 
   }
   if (!THEME_COLOR_PATTERN.test(themeColor)) {
     return { error: "Màu chủ đề phải ở dạng mã hex, ví dụ #EA580C." };
+  }
+  if (busyMessage.length > 300) {
+    return { error: "Lời nhắn khi bận phải có từ 1 đến 300 ký tự." };
+  }
+  if (awayMessage.length > 300) {
+    return { error: "Lời nhắn khi tạm vắng phải có từ 1 đến 300 ký tự." };
   }
   if (allowedOrigins.length > MAX_ORIGINS) {
     return { error: `Chỉ khai báo được tối đa ${MAX_ORIGINS} origin.` };
@@ -145,7 +164,7 @@ function readForm(form: FormData): { payload: SitePayload } | { error: string } 
     payload: {
       name,
       allowedOrigins,
-      settings: { title, themeColor, greeting, imageUrl },
+      settings: { title, themeColor, greeting, imageUrl, busyMessage, awayMessage },
       ...(hours.officeHours ? { officeHours: hours.officeHours } : {}),
     },
   };

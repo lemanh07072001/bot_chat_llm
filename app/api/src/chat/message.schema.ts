@@ -1,5 +1,7 @@
 import { Prop, Schema, SchemaFactory } from '@nestjs/mongoose';
 import { HydratedDocument, Types } from 'mongoose';
+import { AttachmentSubdoc, AttachmentSubdocSchema } from '../attachments/attachment.schema.js';
+import { serializeAttachments } from '../attachments/attachment.types.js';
 
 export type MessageDocument = HydratedDocument<Message>;
 
@@ -49,8 +51,13 @@ export class Message {
   @Prop({ trim: true, maxlength: 100 })
   senderName?: string;
 
-  @Prop({ required: true, trim: true, maxlength: MESSAGE_MAX_LENGTH })
+  /** May be '' when the message carries attachments (ChatService enforces one of the two). */
+  @Prop({ type: String, default: '', trim: true, maxlength: MESSAGE_MAX_LENGTH })
   body!: string;
+
+  /** Embedded copies of the claimed uploads, in the order they were sent. */
+  @Prop({ type: [AttachmentSubdocSchema], default: [] })
+  attachments?: AttachmentSubdoc[];
 
   /**
    * At most one per person per message: a different emoji replaces the previous
@@ -106,6 +113,7 @@ MessageSchema.set('toJSON', {
       externalId: _externalId,
       senderId,
       reactions,
+      attachments,
       ...rest
     } = ret;
     return {
@@ -113,6 +121,7 @@ MessageSchema.set('toJSON', {
       conversationId: String(conversationId),
       senderId: senderId ? String(senderId) : null,
       reactions: serializeReactions(reactions),
+      attachments: serializeAttachments(attachments),
       ...rest,
     };
   },

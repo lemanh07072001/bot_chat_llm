@@ -1,10 +1,28 @@
 import { Prop, Schema, SchemaFactory } from '@nestjs/mongoose';
 import { HydratedDocument } from 'mongoose';
 import { CannedTemplate, CannedTemplateSchema } from '../sites/site.schema.js';
+import {
+  AGENT_STATUSES,
+  DEFAULT_AGENT_STATUS,
+  type AgentStatus,
+} from './agent-status.js';
 
 export type UserDocument = HydratedDocument<User>;
 
 export type UserRole = 'admin' | 'agent';
+
+/**
+ * Which conversations may interrupt this person. Shared by the bell, the
+ * desktop notification and (S2) the missed-chat mail, so it is stored once.
+ */
+export type NotifyScope = 'mine_unassigned' | 'mine' | 'all';
+
+export const DEFAULT_NOTIFY_SCOPE: NotifyScope = 'mine_unassigned';
+
+/** Anything unrecognised — a stale token, an older client — reads as the default. */
+export function normalizeNotifyScope(value: unknown): NotifyScope {
+  return value === 'mine' || value === 'all' ? value : DEFAULT_NOTIFY_SCOPE;
+}
 
 /** It shares one line with the name inside a 320px wide chat box. */
 export const JOB_TITLE_MAX_LENGTH = 60;
@@ -47,6 +65,19 @@ export class User {
   @Prop({ type: Boolean, default: true })
   soundEnabled!: boolean;
 
+  /** Default: threads assigned to me, plus the ones nobody has taken yet. */
+  @Prop({
+    type: String,
+    required: true,
+    enum: ['mine_unassigned', 'mine', 'all'],
+    default: DEFAULT_NOTIFY_SCOPE,
+  })
+  notifyScope!: NotifyScope;
+
+  /** Mail me when a visitor has been waiting too long (S2 scheduler). */
+  @Prop({ type: Boolean, default: true })
+  emailMissed!: boolean;
+
   /**
    * Kept for accounts written before templates carried a title and a shortcut.
    * Read only when `cannedResponseTemplates` is absent; both are shipped so an
@@ -87,6 +118,13 @@ export class User {
   /** Either an http(s) url or a small data url, same shapes as a site image. */
   @Prop({ trim: true, maxlength: AVATAR_URL_MAX_LENGTH })
   avatarUrl?: string;
+
+  /**
+   * What this person tells visitors about their availability. Missing values
+   * (documents written before the field existed) read as online.
+   */
+  @Prop({ type: String, enum: AGENT_STATUSES, default: DEFAULT_AGENT_STATUS })
+  agentStatus!: AgentStatus;
 }
 
 export const UserSchema = SchemaFactory.createForClass(User);

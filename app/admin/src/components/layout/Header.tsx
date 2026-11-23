@@ -1,15 +1,17 @@
 "use client";
 
 import React, { useEffect, useState } from "react";
+import { usePathname } from "next/navigation";
 import {
   Menu,
   Search,
-  Bell,
   LogOut,
 } from "lucide-react";
 import { logout } from "@/app/(auth)/actions";
 import { SidebarUser } from "./Sidebar";
 import { AccountDialog } from "./AccountDialog";
+import { LogoutButton } from "./LogoutButton";
+import { NotificationBell } from "@/components/notifications/NotificationBell";
 import { OPEN_ACCOUNT_PREFERENCES_EVENT } from "@/components/inbox/CannedPicker";
 
 interface HeaderProps {
@@ -18,8 +20,31 @@ interface HeaderProps {
   onOpenSearch: () => void;
 }
 
+/** Breadcrumb title (and its tooltip) for each top-level page. */
+const PAGE_TITLES: { href: string; title: string; description: string }[] = [
+  { href: "/inbox", title: "Hộp thư đến", description: "Hội thoại trực tiếp với khách hàng" },
+  {
+    href: "/tickets",
+    title: "Ticket",
+    description: "Yêu cầu khách để lại khi không có nhân viên trực",
+  },
+  { href: "/channels/widget", title: "Live Chat Widget", description: "Cấu hình khung chat trên website" },
+  { href: "/users", title: "Quản lý người dùng", description: "Tài khoản và phân quyền nhân viên" },
+];
+
+const DEFAULT_PAGE_TITLE = { title: "Tổng quan hệ thống", description: "Tổng quan hệ thống" };
+
+function pageTitleFor(pathname: string) {
+  return (
+    PAGE_TITLES.find(
+      (page) => pathname === page.href || pathname.startsWith(`${page.href}/`),
+    ) ?? DEFAULT_PAGE_TITLE
+  );
+}
+
 export function Header({ user, onOpenMobile, onOpenSearch }: HeaderProps) {
-  const [showNotifications, setShowNotifications] = useState(false);
+  const pathname = usePathname();
+  const page = pageTitleFor(pathname ?? "/");
   const [showAccount, setShowAccount] = useState(false);
   const [accountTab, setAccountTab] = useState("profile");
 
@@ -55,12 +80,16 @@ export function Header({ user, onOpenMobile, onOpenSearch }: HeaderProps) {
         </button>
 
         <div className="flex items-center gap-2 text-xs">
-          <span className="font-semibold text-sm text-[#1D1D1F]">
+          {/* Mobile has room for one crumb: the page's own title when it has one. */}
+          <span className="sm:hidden font-semibold text-sm text-[#1D1D1F]" title={page.description}>
+            {page === DEFAULT_PAGE_TITLE ? "Bàn làm việc" : page.title}
+          </span>
+          <span className="hidden sm:inline font-semibold text-sm text-[#1D1D1F]">
             Bàn làm việc
           </span>
           <span className="hidden sm:inline text-neutral-300">/</span>
-          <span className="hidden sm:inline text-[#86868B]">
-            Tổng quan hệ thống
+          <span className="hidden sm:inline text-[#86868B]" title={page.description}>
+            {page.title}
           </span>
         </div>
       </div>
@@ -86,43 +115,7 @@ export function Header({ user, onOpenMobile, onOpenSearch }: HeaderProps) {
         </div>
 
         {/* Notifications Popover */}
-        <div className="relative">
-          <button
-            onClick={() => setShowNotifications(!showNotifications)}
-            className="relative p-2 rounded-lg text-neutral-500 hover:text-neutral-800 hover:bg-neutral-100 transition-colors cursor-pointer"
-            title="Thông báo hệ thống"
-          >
-            <Bell className="w-4 h-4" />
-            <span className="absolute top-1.5 right-1.5 w-2 h-2 rounded-full bg-orange-600 ring-2 ring-white" />
-          </button>
-
-          {showNotifications && (
-            <div className="absolute right-0 mt-2 w-80 bg-white rounded-2xl shadow-xl border border-black/[0.08] p-4 z-50 text-xs animate-in fade-in zoom-in-95 duration-100">
-              <div className="flex items-center justify-between pb-2 border-b border-black/[0.06] mb-3">
-                <span className="font-semibold text-neutral-900">Thông báo mới</span>
-                <span className="text-[10px] text-[#EA580C] font-semibold cursor-pointer hover:underline">Đánh dấu đã đọc</span>
-              </div>
-              <div className="space-y-3">
-                <div className="flex gap-2.5 items-start">
-                  <span className="w-2 h-2 mt-1 rounded-full bg-orange-500 shrink-0" />
-                  <div>
-                    <p className="text-neutral-800 font-medium text-[11px]">Khách hàng mới cần tư vấn</p>
-                    <p className="text-neutral-400 text-[10px]">Trần Văn Hưng vừa gửi tin nhắn qua Web Widget</p>
-                    <span className="text-[9px] text-neutral-400 mt-0.5 block">2 phút trước</span>
-                  </div>
-                </div>
-                <div className="flex gap-2.5 items-start">
-                  <span className="w-2 h-2 mt-1 rounded-full bg-emerald-500 shrink-0" />
-                  <div>
-                    <p className="text-neutral-800 font-medium text-[11px]">Cập nhật bot flow thành công</p>
-                    <p className="text-neutral-400 text-[10px]">Kịch bản đón tiếp khách VIP đã được kích hoạt</p>
-                    <span className="text-[9px] text-neutral-400 mt-0.5 block">1 giờ trước</span>
-                  </div>
-                </div>
-              </div>
-            </div>
-          )}
-        </div>
+        <NotificationBell />
 
         {/* User Pill & Logout */}
         <div className="flex items-center gap-3 pl-3 border-l border-black/[0.08]">
@@ -140,16 +133,13 @@ export function Header({ user, onOpenMobile, onOpenSearch }: HeaderProps) {
             </div>
           </button>
 
-          <form action={logout}>
-            <button
-              type="submit"
-              title="Đăng xuất khỏi hệ thống"
-              className="p-1.5 sm:px-2.5 sm:py-1.5 rounded-lg border border-black/[0.08] hover:bg-neutral-50 text-xs font-medium text-[#86868B] hover:text-rose-600 transition-all flex items-center gap-1.5 cursor-pointer"
-            >
-              <LogOut className="w-3.5 h-3.5" />
-              <span className="hidden sm:inline">Thoát</span>
-            </button>
-          </form>
+          <LogoutButton
+            action={logout}
+            className="p-1.5 sm:px-2.5 sm:py-1.5 rounded-lg border border-black/[0.08] hover:bg-neutral-50 text-xs font-medium text-[#86868B] hover:text-rose-600 transition-all flex items-center gap-1.5 cursor-pointer"
+          >
+            <LogOut className="w-3.5 h-3.5" />
+            <span className="hidden sm:inline">Thoát</span>
+          </LogoutButton>
         </div>
       </div>
       {showAccount && (

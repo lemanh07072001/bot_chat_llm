@@ -1,4 +1,4 @@
-import { Globe, Inbox, LayoutDashboard, Users, type LucideIcon } from "lucide-react";
+import { Globe, Inbox, LayoutDashboard, Ticket, Users, type LucideIcon } from "lucide-react";
 
 export type NavigationItem = {
   label: string;
@@ -16,6 +16,7 @@ export const NAVIGATION_GROUPS: { groupTitle: string; items: NavigationItem[] }[
   ] },
   { groupTitle: "Hội thoại & CSKH", items: [
     { label: "Hộp thư đến", href: "/inbox", icon: Inbox },
+    { label: "Ticket", href: "/tickets", icon: Ticket },
   ] },
   { groupTitle: "Kênh kết nối", items: [
     { label: "Live Chat Widget", href: "/channels/widget", icon: Globe, adminOnly: true },

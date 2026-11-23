@@ -120,3 +120,36 @@ describe('UsersService.updateManaged', () => {
     expect(update.mock.calls[0][1]).not.toHaveProperty('$inc');
   });
 });
+
+describe('UsersService.setAgentStatus', () => {
+  it('writes the status on a live account and returns it', async () => {
+    const update = vi.fn().mockReturnValue({
+      exec: vi.fn().mockResolvedValue({ agentStatus: 'busy' }),
+    });
+    const service = new UsersService({ findOneAndUpdate: update } as unknown as Model<UserDocument>, sites);
+
+    await expect(service.setAgentStatus('507f1f77bcf86cd799440401', 'busy')).resolves.toBe('busy');
+    expect(update).toHaveBeenCalledWith(
+      { _id: '507f1f77bcf86cd799440401', deletedAt: null },
+      { $set: { agentStatus: 'busy' } },
+      { returnDocument: 'after', runValidators: true },
+    );
+  });
+
+  it('answers null for a deleted, missing or malformed account', async () => {
+    const update = vi.fn().mockReturnValue({ exec: vi.fn().mockResolvedValue(null) });
+    const service = new UsersService({ findOneAndUpdate: update } as unknown as Model<UserDocument>, sites);
+
+    await expect(service.setAgentStatus('507f1f77bcf86cd799440401', 'away')).resolves.toBeNull();
+    await expect(service.setAgentStatus('not-an-id', 'away')).resolves.toBeNull();
+    // A malformed id must not even reach the database.
+    expect(update).toHaveBeenCalledTimes(1);
+  });
+
+  it('reads a document written before the field existed as online', async () => {
+    const update = vi.fn().mockReturnValue({ exec: vi.fn().mockResolvedValue({}) });
+    const service = new UsersService({ findOneAndUpdate: update } as unknown as Model<UserDocument>, sites);
+
+    await expect(service.setAgentStatus('507f1f77bcf86cd799440401', 'away')).resolves.toBe('online');
+  });
+});

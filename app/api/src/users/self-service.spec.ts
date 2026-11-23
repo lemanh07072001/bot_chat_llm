@@ -107,3 +107,46 @@ describe('staff self-service', () => {
     expect((await validate(dto, { whitelist: true, forbidNonWhitelisted: true })).some((error) => error.property === 'role')).toBe(true);
   });
 });
+
+/**
+ * `notifyScope` decides which conversations may interrupt somebody, and
+ * `emailMissed` whether the scheduler may mail them. A value the DTO lets
+ * through unchecked would silently fall back to the default scope, so both are
+ * pinned against the exact set the recipients service understands.
+ */
+describe('preferences dto', () => {
+  function preferences(body: Record<string, unknown>) {
+    return validate(Object.assign(new UpdateOwnPreferencesDto(), body));
+  }
+
+  it.each(['mine_unassigned', 'mine', 'all'])('accepts notifyScope %s', async (notifyScope) => {
+    expect(await preferences({ notifyScope })).toHaveLength(0);
+  });
+
+  it.each(['everything', 'MINE', '', 'all ', true, 1, null])(
+    'rejects notifyScope %s',
+    async (notifyScope) => {
+      const errors = await preferences({ notifyScope });
+
+      expect(errors.map((error) => error.property)).toContain('notifyScope');
+    },
+  );
+
+  it('leaves each field alone when it is absent', async () => {
+    expect(await preferences({})).toHaveLength(0);
+  });
+
+  it('rejects a non-boolean emailMissed', async () => {
+    for (const emailMissed of ['yes', 'true', 1, 0]) {
+      const errors = await preferences({ emailMissed });
+
+      expect(errors.map((error) => error.property)).toContain('emailMissed');
+    }
+  });
+
+  it('accepts both booleans together with a scope', async () => {
+    expect(
+      await preferences({ soundEnabled: false, emailMissed: true, notifyScope: 'mine' }),
+    ).toHaveLength(0);
+  });
+});

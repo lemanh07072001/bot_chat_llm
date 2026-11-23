@@ -43,6 +43,8 @@ export class UsersController {
 
     const user = await this.users.updateSelf(actor.sub, {
       ...(dto.soundEnabled !== undefined ? { soundEnabled: dto.soundEnabled } : {}),
+      ...(dto.notifyScope !== undefined ? { notifyScope: dto.notifyScope } : {}),
+      ...(dto.emailMissed !== undefined ? { emailMissed: dto.emailMissed } : {}),
       ...(normalized
         ? {
             cannedResponseTemplates: normalized,

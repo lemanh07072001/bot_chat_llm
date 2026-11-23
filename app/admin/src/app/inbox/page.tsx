@@ -1,4 +1,5 @@
 import { redirect } from "next/navigation";
+import { Suspense } from "react";
 import Link from "next/link";
 import { AlertTriangle, Settings, RefreshCw } from "lucide-react";
 import { getCurrentUser } from "@/lib/session";
@@ -100,13 +101,15 @@ export default async function InboxPage({
           </div>
         </main>
       ) : (
-        <InboxClient
-          initial={result.data}
-          initialThread={initialThread}
-          initialFilter={filter}
-          currentUser={{ id: user.id, name: user.name, role: user.role }}
-          apiOrigin={apiOrigin}
-        />
+        <Suspense fallback={null}>
+          <InboxClient
+            initial={result.data}
+            initialThread={initialThread}
+            initialFilter={filter}
+            currentUser={{ id: user.id, name: user.name, role: user.role }}
+            apiOrigin={apiOrigin}
+          />
+        </Suspense>
       )}
     </DashboardLayout>
   );

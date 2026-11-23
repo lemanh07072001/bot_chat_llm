@@ -49,6 +49,8 @@ import {
   Tabs,
 } from "@/components/ui";
 import {
+  DEFAULT_AWAY_MESSAGE,
+  DEFAULT_BUSY_MESSAGE,
   DEFAULT_OFFICE_HOURS,
   WEEKDAY_LABELS,
   isOwnedSite,
@@ -463,6 +465,61 @@ function OfficeHoursFields({ state }: { state: ReturnType<typeof useOfficeHoursS
   );
 }
 
+/**
+ * What the widget says while every agent is Bận or Vắng. Independent of the
+ * schedule above: an operator can set these without ever enabling office hours.
+ */
+function useAvailabilityMessagesState(site: Site) {
+  const [busyMessage, setBusyMessage] = useState(
+    site.settings.busyMessage ?? DEFAULT_BUSY_MESSAGE,
+  );
+  const [awayMessage, setAwayMessage] = useState(
+    site.settings.awayMessage ?? DEFAULT_AWAY_MESSAGE,
+  );
+
+  return { busyMessage, setBusyMessage, awayMessage, setAwayMessage };
+}
+
+function AvailabilityMessagesFields({
+  state,
+}: {
+  state: ReturnType<typeof useAvailabilityMessagesState>;
+}) {
+  return (
+    <div className="rounded-xl border border-black/[0.06] p-3.5 space-y-3">
+      <Field
+        label="Lời nhắn khi bận"
+        size="sm"
+        hint="Hiện cho khách khi tất cả nhân viên đang Bận / Vắng."
+      >
+        <textarea
+          name="busyMessage"
+          value={state.busyMessage}
+          onChange={(event) => state.setBusyMessage(event.target.value)}
+          maxLength={300}
+          rows={2}
+          className="w-full rounded-xl border border-neutral-200 bg-white px-3 py-2 text-xs text-[#1D1D1F] outline-none transition resize-none focus:border-[#EA580C]"
+        />
+      </Field>
+
+      <Field
+        label="Lời nhắn khi tạm vắng"
+        size="sm"
+        hint="Hiện cho khách khi tất cả nhân viên đang Bận / Vắng."
+      >
+        <textarea
+          name="awayMessage"
+          value={state.awayMessage}
+          onChange={(event) => state.setAwayMessage(event.target.value)}
+          maxLength={300}
+          rows={2}
+          className="w-full rounded-xl border border-neutral-200 bg-white px-3 py-2 text-xs text-[#1D1D1F] outline-none transition resize-none focus:border-[#EA580C]"
+        />
+      </Field>
+    </div>
+  );
+}
+
 function FormFeedback({ state }: { state: SiteActionState }) {
   if (!state.error && !state.success) {
     return null;
@@ -738,6 +795,7 @@ function ConfigTab({
   const [state, formAction, pending] = useActionState(saveSite, {});
   const formState = useSiteFormState(site);
   const hoursState = useOfficeHoursState(site);
+  const availabilityState = useAvailabilityMessagesState(site);
   const [previewOutsideHours, setPreviewOutsideHours] = useState(false);
   const router = useRouter();
 
@@ -765,6 +823,14 @@ function ConfigTab({
             <span className="text-xs font-medium text-[#1D1D1F]">Giờ làm việc</span>
           </div>
           <OfficeHoursFields state={hoursState} />
+        </div>
+
+        <div>
+          <div className="flex items-center gap-1.5 mb-1.5">
+            <CircleDot className="w-3.5 h-3.5 text-[#86868B]" />
+            <span className="text-xs font-medium text-[#1D1D1F]">Khi nhân viên bận hoặc vắng</span>
+          </div>
+          <AvailabilityMessagesFields state={availabilityState} />
         </div>
 
         <FormFeedback state={state} />

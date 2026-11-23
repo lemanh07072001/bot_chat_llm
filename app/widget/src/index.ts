@@ -28,6 +28,19 @@ function deriveApiUrl(script: HTMLScriptElement | null): string {
 }
 
 /**
+ * `data-notify-sound="false"` opts out; anything else (including absent) keeps
+ * the default. The attribute reads "false" only, so `data-notify-sound` alone
+ * means on rather than off.
+ */
+function flagOption(value: string | undefined): boolean | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+
+  return value !== 'false';
+}
+
+/**
  * Auto-boot for the one-line embed. `document.currentScript` is only valid
  * while the script body runs, so it is read synchronously here — before any
  * listener or promise — and captured for later.
@@ -49,6 +62,8 @@ function autoBoot(): void {
     // The emoji files sit next to the script; an operator behind a CDN that
     // moves them can pin the directory with data-asset-base-url.
     assetBaseUrl: resolveAssetBase(script?.dataset.assetBaseUrl, script?.src, apiUrl),
+    notifySound: flagOption(script?.dataset.notifySound),
+    notifyTitle: flagOption(script?.dataset.notifyTitle),
   };
 
   const start = () => {

@@ -1,6 +1,7 @@
 import { Type } from 'class-transformer';
-import { ArrayMaxSize, IsArray, IsBoolean, IsString, Matches, MaxLength, MinLength, ValidateIf, ValidateNested } from 'class-validator';
+import { ArrayMaxSize, IsArray, IsBoolean, IsIn, IsString, Matches, MaxLength, MinLength, ValidateIf, ValidateNested } from 'class-validator';
 import { CannedTemplateDto } from '../canned-responses/canned-responses.dto.js';
+import type { NotifyScope } from './user.schema.js';
 
 export class UpdateSelfProfileDto {
   @IsString()
@@ -34,6 +35,16 @@ export class UpdateOwnPreferencesDto {
   @ValidateIf((_object, value) => value !== undefined)
   @IsBoolean()
   soundEnabled?: boolean;
+
+  /** Which conversations may notify this person. */
+  @ValidateIf((_object, value) => value !== undefined)
+  @IsIn(['mine_unassigned', 'mine', 'all'])
+  notifyScope?: NotifyScope;
+
+  /** Whether the missed-chat scheduler may email this person. */
+  @ValidateIf((_object, value) => value !== undefined)
+  @IsBoolean()
+  emailMissed?: boolean;
 
   @ValidateIf((_object, value) => value !== undefined)
   @IsArray()

@@ -27,8 +27,14 @@ export function proxy(request: NextRequest) {
 
 export const config = {
   matcher: [
-    // Exclude static assets, image optimization and favicon so they are
-    // never blocked/redirected by the auth check above.
-    "/((?!_next/static|_next/image|favicon.ico).*)",
+    // Exclude static assets, image optimization, favicon and the push service
+    // worker so they are never blocked/redirected by the auth check above.
+    // The worker must be fetchable without a session cookie: the browser
+    // fetches it at install time, and a redirect to /login breaks push.
+    // api/uploads is excluded because proxy buffers request bodies only up to
+    // proxyClientMaxBodySize (10MB default) and would truncate ~10MB images;
+    // that route handler verifies the session token itself. `$` anchors it so
+    // only exactly /api/uploads skips (not /api/uploadsX or /api/uploads/x).
+    "/((?!_next/static|_next/image|favicon.ico|sw.js|api/uploads$).*)",
   ],
 };

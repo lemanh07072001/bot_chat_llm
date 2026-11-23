@@ -1,5 +1,6 @@
 import { Prop, Schema, SchemaFactory } from '@nestjs/mongoose';
 import { HydratedDocument, Types } from 'mongoose';
+import { DEFAULT_AWAY_MESSAGE, DEFAULT_BUSY_MESSAGE } from '../users/agent-status.js';
 
 export type SiteDocument = HydratedDocument<Site>;
 
@@ -21,6 +22,14 @@ export class WidgetSettings {
     maxlength: 200,
   })
   greeting!: string;
+
+  /** Shown in the widget while every online agent has set themselves busy. */
+  @Prop({ required: true, default: DEFAULT_BUSY_MESSAGE, trim: true, maxlength: 300 })
+  busyMessage!: string;
+
+  /** Shown in the widget while every online agent has set themselves away. */
+  @Prop({ required: true, default: DEFAULT_AWAY_MESSAGE, trim: true, maxlength: 300 })
+  awayMessage!: string;
 }
 
 export const WidgetSettingsSchema = SchemaFactory.createForClass(WidgetSettings);

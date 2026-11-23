@@ -10,6 +10,10 @@ import { ChatModule } from './chat/chat.module.js';
 import { WidgetModule } from './widget/widget.module.js';
 import { TelegramModule } from './telegram/telegram.module.js';
 import { CannedResponsesModule } from './canned-responses/canned-responses.module.js';
+import { NotificationsModule } from './notifications/notifications.module.js';
+import { NotificationSchedulerModule } from './notifications/notification-scheduler.module.js';
+import { TicketsModule } from './tickets/tickets.module.js';
+import { AttachmentsModule } from './attachments/attachments.module.js';
 
 import { RealtimeSharedModule } from './realtime/realtime-shared.module.js';
 
@@ -32,6 +36,11 @@ import { RealtimeSharedModule } from './realtime/realtime-shared.module.js';
     WidgetModule,
     TelegramModule,
     CannedResponsesModule,
+    NotificationsModule,
+    TicketsModule,
+    AttachmentsModule,
+    // Background sweeps: api only, never the realtime service.
+    NotificationSchedulerModule,
   ],
   controllers: [AppController],
   providers: [AppService],

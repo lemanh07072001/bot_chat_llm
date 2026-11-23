@@ -14,6 +14,7 @@ import type { ConversationDocument } from './conversation.schema.js';
 import type { SiteDocument } from '../sites/site.schema.js';
 import type { JwtPayload } from '../auth/jwt-payload.type.js';
 import type { InternalNotesService } from './internal-notes.service.js';
+import type { NotificationsService } from '../notifications/notifications.service.js';
 
 const OWNER = '507f1f77bcf86cd799430001';
 const MANAGER = '507f1f77bcf86cd799430002';
@@ -43,11 +44,16 @@ function conversation(
     visitorId: '507f1f77bcf86cd799433001',
     status: 'open',
     assignedAgentId: null,
+    // Written by the same atomic update that changed the assignee.
+    updatedAt: new Date('2026-01-02T03:04:05.000Z'),
     ...overrides,
   };
 
   return {
     ...base,
+    // The controller passes `updated.get('updatedAt')` to the bell as the
+    // moment of the handover, so the fake has to answer `get`.
+    get: (path: string) => (base as Record<string, unknown>)[path],
     toJSON: () => ({ ...base, id: CONVERSATION_ID }),
   } as unknown as ConversationDocument;
 }
@@ -74,6 +80,11 @@ describe('ConversationsController', () => {
   const users = { findById: vi.fn(), findManyByIds: vi.fn() };
   const bus = { emitToSite: vi.fn(), emitToConversation: vi.fn() };
   const notes = { list: vi.fn(), create: vi.fn() };
+  const notifications = {
+    onAssignment: vi.fn(),
+    onContactLeft: vi.fn(),
+    onVisitorMessage: vi.fn(),
+  };
 
   const controller = new ConversationsController(
     chat as unknown as ChatService,
@@ -81,6 +92,7 @@ describe('ConversationsController', () => {
     users as unknown as UsersService,
     bus as unknown as RealtimeBusService,
     notes as unknown as InternalNotesService,
+    notifications as unknown as NotificationsService,
   );
 
   beforeEach(() => {
@@ -94,17 +106,39 @@ describe('ConversationsController', () => {
   });
 
   it('scopes unread message totals to accessible projects', async () => {
-    chat.unreadCounts.mockResolvedValue({ unread: 12, unassignedUnread: 3 });
-    expect(await controller.unreadCounts(actor(MANAGER))).toEqual({ unread: 12, unassignedUnread: 3 });
+    chat.unreadCounts.mockResolvedValue({
+      unread: 12,
+      unassignedUnread: 3,
+      notificationUnread: 2,
+    });
+    users.findById.mockResolvedValue({ notifyScope: 'mine_unassigned' });
+
+    expect(await controller.unreadCounts(actor(MANAGER))).toEqual({
+      unread: 12,
+      unassignedUnread: 3,
+      notificationUnread: 2,
+    });
     expect(sites.listAccessible).toHaveBeenCalledWith(MANAGER);
-    expect(chat.unreadCounts).toHaveBeenCalledWith([SITE_ID]);
+    // The tab-title count follows the caller's own preference.
+    expect(chat.unreadCounts).toHaveBeenCalledWith([SITE_ID], {
+      userId: MANAGER,
+      notifyScope: 'mine_unassigned',
+    });
   });
 
   it('never counts other projects for users without access', async () => {
     sites.listAccessible.mockResolvedValue([]);
-    chat.unreadCounts.mockResolvedValue({ unread: 0, unassignedUnread: 0 });
+    users.findById.mockResolvedValue({ notifyScope: 'all' });
+    chat.unreadCounts.mockResolvedValue({
+      unread: 0,
+      unassignedUnread: 0,
+      notificationUnread: 0,
+    });
     await controller.unreadCounts(actor(OUTSIDER));
-    expect(chat.unreadCounts).toHaveBeenCalledWith([]);
+    expect(chat.unreadCounts).toHaveBeenCalledWith([], {
+      userId: OUTSIDER,
+      notifyScope: 'all',
+    });
   });
 
   describe('scoping', () => {
@@ -284,6 +318,44 @@ describe('ConversationsController', () => {
         CONVERSATION_ID,
         MANAGER,
       );
+    });
+
+    it('tells the bell who held the thread before the handover', async () => {
+      sites.accessForSite.mockResolvedValue('owner');
+      sites.accessFor.mockResolvedValue('manager');
+      // Somebody else held it: that is what the new holder's bell is about.
+      chat.findConversationById.mockResolvedValue(
+        conversation({ assignedAgentId: MANAGER }),
+      );
+      users.findById.mockResolvedValue({ _id: OUTSIDER });
+      const updated = conversation({ assignedAgentId: OUTSIDER });
+      chat.assignConversation.mockResolvedValue(updated);
+
+      await controller.assign(actor(OWNER), CONVERSATION_ID, {
+        agentId: OUTSIDER,
+      });
+
+      expect(notifications.onAssignment).toHaveBeenCalledWith({
+        actorId: OWNER,
+        previousAgentId: MANAGER,
+        nextAgentId: OUTSIDER,
+        conversation: updated,
+        // Same stamp the write carries, so a replay of this handover dedupes.
+        assignedAt: updated.get('updatedAt'),
+      });
+    });
+
+    it('does not ring anybody when a thread is released', async () => {
+      sites.accessForSite.mockResolvedValue('owner');
+      chat.findConversationById.mockResolvedValue(
+        conversation({ assignedAgentId: OWNER }),
+      );
+      chat.assignConversation.mockResolvedValue(conversation());
+
+      await controller.release(actor(OWNER), CONVERSATION_ID);
+
+      // Releasing is the absence of a holder, not a handover to somebody.
+      expect(notifications.onAssignment).not.toHaveBeenCalled();
     });
 
     it('only lets the holder or the owner release a thread', async () => {

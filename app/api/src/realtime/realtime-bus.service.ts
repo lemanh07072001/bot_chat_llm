@@ -1,5 +1,5 @@
 import { Injectable } from '@nestjs/common';
-import { conversationRoom, siteRoom } from './rooms.js';
+import { conversationRoom, siteRoom, userRoom } from './rooms.js';
 
 /** The slice of socket.io's Server used for broadcasting. */
 export interface BroadcastTarget {
@@ -42,5 +42,15 @@ export class RealtimeBusService {
   emitToConversation(conversationId: string, event: string, payload: unknown): void {
     if (this.remote) this.remote(conversationRoom(conversationId), event, payload);
     else this.deliver(conversationRoom(conversationId), event, payload);
+  }
+
+  /**
+   * One person's own sockets. Used for events that are addressed to somebody
+   * rather than to a project or a thread — the notification bell above all.
+   */
+  emitToUser(userId: string, event: string, payload: unknown): void {
+    const room = userRoom(userId);
+    if (this.remote) this.remote(room, event, payload);
+    else this.deliver(room, event, payload);
   }
 }

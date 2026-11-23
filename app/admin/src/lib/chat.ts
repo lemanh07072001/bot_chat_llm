@@ -4,6 +4,8 @@
  * must never be imported from client code.
  */
 
+import type { AttachmentView } from "@/lib/attachments";
+
 export type ConversationStatus = "open" | "closed";
 
 export type ConversationVisitor = {
@@ -113,7 +115,9 @@ export type ChatMessage = {
   senderId: string | null;
   senderName?: string;
   sender?: { id: string; name: string; avatarUrl: string | null; jobTitle: string | null } | null;
+  /** May be '' when the message only carries images. */
   body: string;
+  attachments?: AttachmentView[];
   reactions?: MessageReaction[];
   createdAt: string;
 };
@@ -121,27 +125,49 @@ export type ChatMessage = {
 /**
  * Collapses the stored list into one badge per emoji, in first-seen order, and
  * reports which emoji the viewer picked so the badge can be highlighted.
+ * `nameOf` labels everyone else's reactions, for the badge tooltip.
  */
 export function summarizeReactions(
   reactions: MessageReaction[] | undefined,
   viewerId: string | null,
-): { badges: Array<{ emoji: string; count: number; mine: boolean }>; mine: string | null } {
-  const byEmoji = new Map<string, { emoji: string; count: number; mine: boolean }>();
+  nameOf?: (reaction: MessageReaction) => string,
+): {
+  badges: Array<{ emoji: string; count: number; mine: boolean; others: string[] }>;
+  mine: string | null;
+} {
+  const byEmoji = new Map<
+    string,
+    { emoji: string; count: number; mine: boolean; others: string[] }
+  >();
   let mine: string | null = null;
 
   for (const reaction of reactions ?? []) {
-    const entry = byEmoji.get(reaction.emoji) ?? { emoji: reaction.emoji, count: 0, mine: false };
+    const entry = byEmoji.get(reaction.emoji) ?? {
+      emoji: reaction.emoji,
+      count: 0,
+      mine: false,
+      others: [],
+    };
     entry.count += 1;
 
     if (viewerId && reaction.kind === "agent" && reaction.id === viewerId) {
       entry.mine = true;
       mine = reaction.emoji;
+    } else if (nameOf) {
+      const name = nameOf(reaction);
+      if (!entry.others.includes(name)) entry.others.push(name);
     }
 
     byEmoji.set(reaction.emoji, entry);
   }
 
   return { badges: [...byEmoji.values()], mine };
+}
+
+/** "A", "A và B", "A, B và C" — for "who reacted" tooltips. */
+export function joinNames(names: string[]): string {
+  if (names.length <= 1) return names[0] ?? "";
+  return `${names.slice(0, -1).join(", ")} và ${names[names.length - 1]}`;
 }
 
 /** Best label we have for an anonymous visitor. */

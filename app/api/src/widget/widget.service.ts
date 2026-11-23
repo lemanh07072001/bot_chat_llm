@@ -16,6 +16,13 @@ import { AgentRegistryService } from '../realtime/agent-registry.service.js';
 import type { WidgetSettings } from '../sites/site.schema.js';
 import { UsersService } from '../users/users.service.js';
 import { agentProfileOf, type AgentProfile } from '../users/user.schema.js';
+import {
+  DEFAULT_AWAY_MESSAGE,
+  DEFAULT_BUSY_MESSAGE,
+  type TeamStatus,
+} from '../users/agent-status.js';
+import type { VisitorDocument } from '../chat/visitor.schema.js';
+import type { SiteDocument } from '../sites/site.schema.js';
 
 /**
  * What the widget tells the visitor to expect. Nothing here blocks sending a
@@ -26,10 +33,16 @@ export interface WidgetAvailability {
   maintenance?: boolean;
   /** At least one member of the project has the inbox open. */
   agentsOnline: boolean;
+  /** The best status among connected agents; `offline` when none is connected. */
+  teamStatus: TeamStatus;
   /** False only when the project declared hours and now is outside them. */
   withinOfficeHours: boolean;
   /** Shown when outside office hours. */
   offlineMessage: string;
+  /** Shown while the team is busy, unless the project wrote its own. */
+  busyMessage: string;
+  /** Shown while the team is away, unless the project wrote its own. */
+  awayMessage: string;
 }
 
 export interface WidgetSessionResult {
@@ -91,9 +104,10 @@ export class WidgetService {
   async createSession(input: {
     publicKey: string;
     visitorKey?: string;
+    resumeOnly?: boolean;
     origin?: string;
     userAgent?: string;
-  }): Promise<WidgetSessionResult> {
+  }): Promise<WidgetSessionResult | { resumed: false }> {
     const site = await this.sitesService.findByPublicKey(input.publicKey);
 
     // Same response for unknown and deactivated keys: probing a key should not
@@ -110,11 +124,38 @@ export class WidgetService {
 
     if (!site.active) throw new ServiceUnavailableException({ code: 'WIDGET_MAINTENANCE', message: 'Hệ thống chat đang bảo trì. Vui lòng quay lại sau.' });
     const siteId = String(site._id);
+
+    // "Reattach to my old chat, or tell me there is none." Answered before any
+    // write: an unknown or missing key creates no visitor and no conversation,
+    // so a widget polling this endpoint cannot mint rows.
+    if (input.resumeOnly) {
+      const existing = input.visitorKey
+        ? await this.chatService.findVisitorByKey(siteId, input.visitorKey)
+        : null;
+
+      if (!existing) {
+        return { resumed: false };
+      }
+
+      return this.buildSession(site, existing);
+    }
+
     const visitor = await this.chatService.resolveVisitor(
       siteId,
       input.visitorKey,
       input.userAgent,
     );
+
+    return this.buildSession(site, visitor);
+  }
+
+  /** Everything a widget needs once the visitor row is known. */
+  private async buildSession(
+    site: SiteDocument,
+    visitor: VisitorDocument,
+  ): Promise<WidgetSessionResult> {
+    const siteId = String(site._id);
+
     const conversation = await this.chatService.resolveOpenConversation(
       siteId,
       String(visitor._id),
@@ -144,12 +185,10 @@ export class WidgetService {
       visitorKey: visitor.visitorKey,
       visitorId: String(visitor._id),
       conversationId,
-      settings: site.settings,
-      availability: {
-        agentsOnline: this.bridge ? await this.bridge.isAnyoneOnline(siteId) : this.agents.isAnyoneOnlineForSite(siteId),
-        withinOfficeHours: this.sitesService.isWithinOfficeHours(site),
-        offlineMessage: site.officeHours?.offlineMessage ?? '',
-      },
+      // Projects saved before these fields existed keep their old documents;
+      // the defaults are filled in so the widget always has a message.
+      settings: this.withMessageDefaults(site.settings),
+      availability: await this.buildAvailability(site),
       contact: { name: visitor.name ?? null, email: visitor.email ?? null },
       messages: history.messages.map((message) => message.toJSON()),
       agents: profiles,
@@ -159,13 +198,53 @@ export class WidgetService {
     };
   }
 
+  /**
+   * The stored widget settings plus the message defaults, as a plain object.
+   *
+   * A project saved before these messages existed has neither key, and the
+   * widget must still be able to show something.
+   */
+  private withMessageDefaults(settings?: WidgetSettings): WidgetSettings {
+    // A hydrated subdocument only serialises through toObject(); a plain
+    // object (a lean read, a test fixture) is already what we want.
+    const source = settings as (Partial<WidgetSettings> & { toObject?: () => Partial<WidgetSettings> }) | undefined;
+    const stored: Partial<WidgetSettings> =
+      typeof source?.toObject === 'function' ? source.toObject() : source ?? {};
+
+    return {
+      ...stored,
+      busyMessage: stored.busyMessage || DEFAULT_BUSY_MESSAGE,
+      awayMessage: stored.awayMessage || DEFAULT_AWAY_MESSAGE,
+    } as WidgetSettings;
+  }
+
   async availabilityForSite(siteId: string): Promise<WidgetAvailability> {
     const site = await this.sitesService.findById(siteId);
     if (!site) throw new UnauthorizedException('Unknown site');
+    return this.buildAvailability(site);
+  }
+
+  /**
+   * The one place that answers "what should this visitor expect right now".
+   *
+   * Both the session bootstrap and the polling endpoint go through here, so a
+   * visitor cannot see two different answers depending on which one they hit.
+   * `agentsOnline` keeps its old meaning — somebody is connected — while
+   * `teamStatus` says what that somebody set themselves to.
+   */
+  private async buildAvailability(site: SiteDocument): Promise<WidgetAvailability> {
+    const siteId = String(site._id);
+    const teamStatus = this.bridge
+      ? await this.bridge.teamStatusForSite(siteId)
+      : this.agents.teamStatusForSite(siteId);
+
     return {
-      agentsOnline: this.bridge ? await this.bridge.isAnyoneOnline(siteId) : this.agents.isAnyoneOnlineForSite(siteId),
+      agentsOnline: teamStatus !== 'offline',
+      teamStatus,
       withinOfficeHours: this.sitesService.isWithinOfficeHours(site),
       offlineMessage: site.officeHours?.offlineMessage ?? '',
+      busyMessage: site.settings?.busyMessage || DEFAULT_BUSY_MESSAGE,
+      awayMessage: site.settings?.awayMessage || DEFAULT_AWAY_MESSAGE,
     };
   }
 

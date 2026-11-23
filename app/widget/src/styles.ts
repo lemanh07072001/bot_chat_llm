@@ -46,6 +46,19 @@ export const STYLES = `
   .launcher:focus-visible { outline: 2px solid var(--cc-theme); outline-offset: 3px; }
   .launcher svg { width: 26px; height: 26px; fill: none; stroke: currentColor; stroke-width: 2; }
 
+  /* One nudge when a new agent message lands while the panel is closed; the
+     class is added once and removed when the animation ends. */
+  .launcher.attention { animation: cc-launcher-attention 1.1s ease-in-out; }
+  @keyframes cc-launcher-attention {
+    0%, 100% { transform: translateY(0) scale(1); }
+    30% { transform: translateY(-6px) scale(1.05); }
+    55% { transform: translateY(0) scale(1); }
+    75% { transform: translateY(-3px) scale(1.02); }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .launcher.attention { animation: none; }
+  }
+
   /*
    * An avatar slot. The picture sits on top of the initials, so a missing or
    * broken image simply reveals the letters underneath — no layout shift, and
@@ -140,6 +153,31 @@ export const STYLES = `
 
   .maintenance-notice { padding: 18px; background: #fff7ed; color: #9a3412; font-size: 14px; line-height: 1.5; text-align: center; }
   .maintenance-notice[hidden] { display: none; }
+
+  /*
+   * The team's busy/away banner. Soft amber while they are busy (they are
+   * there, just occupied), plain slate while they are away (nobody is). It is
+   * a sibling of the stream, so it stays put while messages scroll.
+   */
+  .notice {
+    flex: 0 0 auto;
+    padding: 10px 14px;
+    border-bottom: 1px solid var(--cc-hairline);
+    background: #f6f6f8;
+    color: var(--cc-text);
+    font-size: 12.5px;
+    line-height: 1.45;
+  }
+  /* Also spelled out for the shadow root: a bare [hidden] rule from the host
+     page cannot reach in here, and the class rules above set display. */
+  .notice[hidden] { display: none; }
+  .notice-title { font-weight: 600; margin-bottom: 2px; }
+  .notice-text { color: var(--cc-muted); overflow-wrap: anywhere; }
+  .notice-busy { background: #fff8eb; border-bottom-color: rgba(180, 120, 20, 0.22); }
+  .notice-busy .notice-title { color: #92400e; }
+  .notice-busy .notice-text { color: #a16207; }
+  .notice-away { background: #f6f6f8; }
+  .notice-away .notice-title { color: #3c3c43; }
 
   .body {
     flex: 1 1 auto;
@@ -254,10 +292,15 @@ export const STYLES = `
   }
   .reaction-badge:hover { background: var(--cc-agent-bg); }
   .reaction-badge:focus-visible { outline: 2px solid var(--cc-theme); outline-offset: 1px; }
+  /* The visitor's own reaction gets a tinted fill, not just a coloured edge,
+     so it stands apart from an agent's badge at a glance. */
   .reaction-badge.mine {
     border-color: var(--cc-theme);
     color: var(--cc-theme);
-    background: var(--cc-surface);
+    background: color-mix(in srgb, var(--cc-theme) 12%, var(--cc-surface));
+  }
+  .reaction-badge.mine:hover {
+    background: color-mix(in srgb, var(--cc-theme) 20%, var(--cc-surface));
   }
   .reaction-glyph { font-size: 13px; line-height: 1; }
 
@@ -335,7 +378,8 @@ export const STYLES = `
   .contact.visible { display: flex; }
   .contact-text { font-size: 12px; color: var(--cc-muted); line-height: 1.45; }
   .contact-fields { display: flex; gap: 6px; }
-  .contact input {
+  .contact input,
+  .contact textarea {
     flex: 1;
     min-width: 0;
     border: 1px solid var(--cc-hairline);
@@ -346,7 +390,31 @@ export const STYLES = `
     color: var(--cc-text);
     background: var(--cc-surface);
   }
-  .contact input:focus-visible { outline: 2px solid var(--cc-theme); outline-offset: -1px; }
+  .contact textarea { resize: vertical; min-height: 54px; max-height: 160px; line-height: 1.4; }
+  .contact input:focus-visible,
+  .contact textarea:focus-visible { outline: 2px solid var(--cc-theme); outline-offset: -1px; }
+  .contact-done {
+    display: none;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 4px;
+    padding: 10px 14px;
+    border-top: 1px solid var(--cc-hairline);
+    background: #f0fdf4;
+  }
+  .contact-done.visible { display: flex; }
+  .contact-done-text { font-size: 12px; color: #166534; line-height: 1.45; }
+  .contact-again {
+    border: 0;
+    padding: 0;
+    background: none;
+    color: var(--cc-theme);
+    font: inherit;
+    font-size: 12px;
+    font-weight: 600;
+    text-decoration: underline;
+    cursor: pointer;
+  }
   .contact-send {
     align-self: flex-start;
     border: 0;
@@ -627,6 +695,168 @@ export const STYLES = `
   .emoji-trigger:focus-visible { outline: 2px solid var(--cc-theme); outline-offset: 2px; }
   .emoji-trigger svg { width: 18px; height: 18px; fill: currentColor; }
 
+  /* Image attachments: composer button, pending tray, bubble grid. */
+  .attach-trigger {
+    flex: 0 0 auto;
+    width: 38px;
+    height: 38px;
+    border: 0;
+    border-radius: 50%;
+    background: transparent;
+    color: var(--cc-muted);
+    padding: 0;
+    cursor: pointer;
+    display: grid;
+    place-items: center;
+  }
+  .attach-trigger[hidden] { display: none; }
+  .attach-trigger:hover { background: var(--cc-agent-bg); }
+  .attach-trigger:disabled { opacity: 0.4; cursor: not-allowed; }
+  .attach-trigger:focus-visible { outline: 2px solid var(--cc-theme); outline-offset: 2px; }
+  .attach-trigger svg { width: 19px; height: 19px; fill: currentColor; }
+
+  .attach-tray {
+    flex: 0 0 auto;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+  .attach-tray[hidden] { display: none; }
+  .attach-tray-chat {
+    border-top: 1px solid var(--cc-hairline);
+    padding: 8px 10px 0;
+    background: var(--cc-surface);
+  }
+  .attach-tray-chat + .composer { border-top: 0; }
+  .attach-item {
+    position: relative;
+    width: 56px;
+    height: 56px;
+    border-radius: 10px;
+    overflow: hidden;
+    background: var(--cc-agent-bg);
+    flex: 0 0 auto;
+  }
+  .attach-thumb {
+    display: block;
+    width: 100%;
+    height: 100%;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    cursor: default;
+  }
+  .attach-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .attach-thumb:focus-visible { outline: 2px solid var(--cc-theme); outline-offset: -2px; }
+  .attach-item[data-state="uploading"] .attach-thumb img { opacity: 0.55; }
+  .attach-item[data-state="error"] .attach-thumb { cursor: pointer; }
+  .attach-item[data-state="error"] .attach-thumb img { opacity: 0.35; }
+  .attach-item[data-state="error"] { box-shadow: inset 0 0 0 2px #d93025; }
+  .attach-item[data-state="error"]::after {
+    content: "!";
+    position: absolute;
+    inset: 0;
+    display: grid;
+    place-items: center;
+    color: #b3261e;
+    font-weight: 700;
+    font-size: 18px;
+    pointer-events: none;
+  }
+  .attach-spinner {
+    display: none;
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    width: 20px;
+    height: 20px;
+    margin: -10px 0 0 -10px;
+    border: 2px solid rgba(255, 255, 255, 0.7);
+    border-top-color: var(--cc-theme);
+    border-radius: 50%;
+    animation: cc-attach-spin 0.8s linear infinite;
+    pointer-events: none;
+  }
+  .attach-item[data-state="uploading"] .attach-spinner { display: block; }
+  @keyframes cc-attach-spin { to { transform: rotate(360deg); } }
+  .attach-progress {
+    display: none;
+    position: absolute;
+    left: 4px;
+    right: 4px;
+    bottom: 4px;
+    height: 3px;
+    border-radius: 2px;
+    background: rgba(255, 255, 255, 0.6);
+    overflow: hidden;
+    pointer-events: none;
+  }
+  .attach-item[data-state="uploading"] .attach-progress { display: block; }
+  .attach-progress-bar { height: 100%; width: 0; background: var(--cc-theme); transition: width 0.15s linear; }
+  .attach-remove {
+    position: absolute;
+    top: 2px;
+    right: 2px;
+    width: 20px;
+    height: 20px;
+    border: 0;
+    border-radius: 50%;
+    padding: 0;
+    background: rgba(0, 0, 0, 0.6);
+    color: #fff;
+    font: inherit;
+    font-size: 14px;
+    line-height: 20px;
+    text-align: center;
+    cursor: pointer;
+  }
+  .attach-remove:hover { background: rgba(0, 0, 0, 0.8); }
+  .attach-remove:focus-visible { outline: 2px solid var(--cc-theme); outline-offset: 1px; }
+  .attach-remove:disabled, .attach-thumb:disabled { opacity: 0.6; cursor: not-allowed; }
+
+  .contact-attach-row { display: flex; }
+  .contact-attach {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    border: 1px dashed var(--cc-hairline);
+    border-radius: 8px;
+    background: transparent;
+    color: var(--cc-muted);
+    padding: 5px 10px;
+    font: inherit;
+    font-size: 12px;
+    cursor: pointer;
+  }
+  .contact-attach:hover { color: var(--cc-text); background: var(--cc-agent-bg); }
+  .contact-attach:disabled { opacity: 0.6; cursor: not-allowed; }
+  .contact-attach:focus-visible { outline: 2px solid var(--cc-theme); outline-offset: 1px; }
+  .contact-attach svg { width: 16px; height: 16px; fill: currentColor; }
+
+  .panel.dragging { box-shadow: 0 0 0 3px var(--cc-theme), 0 12px 40px rgba(0, 0, 0, 0.18); }
+
+  .bubble.has-media { padding: 4px; }
+  .bubble-text { padding: 5px 9px 5px; }
+  .media-grid { display: grid; gap: 4px; }
+  .media-grid.single { max-width: 240px; }
+  .media-grid.multi { grid-template-columns: repeat(2, minmax(0, 1fr)); width: 240px; max-width: 100%; }
+  .media-item {
+    display: block;
+    border-radius: 12px;
+    overflow: hidden;
+    background: rgba(0, 0, 0, 0.06);
+  }
+  .media-item:focus-visible { outline: 2px solid var(--cc-theme); outline-offset: 2px; }
+  .media-item img { display: block; width: 100%; }
+  .media-grid.single .media-item img { height: auto; max-height: 320px; object-fit: cover; }
+  .media-grid.multi .media-item { aspect-ratio: 1 / 1; }
+  .media-grid.multi .media-item img { height: 100%; object-fit: cover; }
+
+  @media (prefers-reduced-motion: reduce) {
+    .attach-spinner { animation-duration: 2s; }
+    .attach-progress-bar { transition: none; }
+  }
+
   .error {
     margin: 0 14px 10px;
     padding: 8px 10px;
@@ -649,13 +879,63 @@ export const STYLES = `
       border: 0;
     }
     .launcher { right: 16px; bottom: 16px; }
+    .notice { padding: 9px 12px; font-size: 12px; }
+    /* Narrow screens: stack name/email; 16px avoids iOS zoom on focus. */
+    .contact-fields { flex-direction: column; }
+    .contact input, .contact textarea { font-size: 16px; }
     /* The picker shares the full-screen card with the stream; keep a slice of
        the conversation visible above it. */
     .emoji-picker { max-height: 45vh; }
+    .attach-item { width: 52px; height: 52px; }
+    .attach-remove { width: 24px; height: 24px; line-height: 24px; }
     .emoji-grid { grid-template-columns: repeat(8, 1fr); }
+  }
+
+  /*
+   * The tooltip drawn by tooltip.ts for every title attribute. Near-black like
+   * the card's own text so it reads against any site theme colour, and above
+   * the panel's z-index so it is never tucked under the card.
+   */
+  .cc-tooltip {
+    position: fixed;
+    z-index: 2147483001;
+    max-width: min(240px, calc(100vw - 16px));
+    padding: 5px 9px;
+    border-radius: 7px;
+    background: #1d1d1f;
+    color: #fff;
+    font-family: inherit;
+    font-size: 12px;
+    font-weight: 500;
+    line-height: 1.35;
+    white-space: pre-line;
+    overflow-wrap: anywhere;
+    pointer-events: none;
+    box-shadow: 0 4px 14px rgba(0, 0, 0, 0.18);
+  }
+  .cc-tooltip[hidden] { display: none; }
+  .cc-tooltip-in { animation: cc-tooltip-in 120ms ease-out; }
+  .cc-tooltip-in[data-side="bottom"] { animation-name: cc-tooltip-in-below; }
+  .cc-tooltip-arrow {
+    position: absolute;
+    width: 8px;
+    height: 8px;
+    margin-left: -4px;
+    background: inherit;
+    border-radius: 1px;
+    transform: rotate(45deg);
+  }
+  .cc-tooltip[data-side="top"] .cc-tooltip-arrow { bottom: -4px; }
+  .cc-tooltip[data-side="bottom"] .cc-tooltip-arrow { top: -4px; }
+  @keyframes cc-tooltip-in {
+    from { opacity: 0; transform: translateY(3px); }
+  }
+  @keyframes cc-tooltip-in-below {
+    from { opacity: 0; transform: translateY(-3px); }
   }
 
   @media (prefers-reduced-motion: reduce) {
     .launcher { transition: none; }
+    .cc-tooltip-in { animation: none; }
   }
 `;

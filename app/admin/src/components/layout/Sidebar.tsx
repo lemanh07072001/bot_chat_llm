@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState } from "react";
+import React from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import {
@@ -13,6 +13,9 @@ import {
 } from "lucide-react";
 import { isNavigationActive, navigationForRole } from "./navigation";
 import { useUnreadCounts } from "./useUnreadCounts";
+import { useTicketBadge } from "@/components/tickets/useTicketBadge";
+import { useAgentStatus } from "@/components/notifications/NotificationsProvider";
+import { LogoutButton } from "./LogoutButton";
 import { logout } from "@/app/(auth)/actions";
 
 export interface SidebarUser {
@@ -38,7 +41,18 @@ export function Sidebar({
 }) {
   const pathname = usePathname();
   const unreadCounts = useUnreadCounts();
-  const [agentStatus, setAgentStatus] = useState<"online" | "busy" | "away">("online");
+  const ticketBadge = useTicketBadge();
+  const { agentStatus, agentStatusPending, agentStatusError, setAgentStatus } = useAgentStatus();
+  const statusLabel =
+    agentStatus === "online"
+      ? "Sẵn sàng"
+      : agentStatus === "busy"
+        ? "Bận"
+        : agentStatus === "away"
+          ? "Tạm vắng"
+          : "Đang kết nối...";
+  // No status yet (no `ready` from the socket) or a change in flight: no clicks.
+  const statusLocked = agentStatus === null || agentStatusPending;
 
   const initials = user?.name
     ? user.name
@@ -141,16 +155,17 @@ export function Sidebar({
                       : "bg-neutral-400"
                   }`}
                 />
-                <span className="text-[11px] font-semibold text-neutral-800">
-                  {agentStatus === "online" ? "Sẵn sàng" : agentStatus === "busy" ? "Bận" : "Tạm vắng"}
-                </span>
+                <span className="text-[11px] font-semibold text-neutral-800">{statusLabel}</span>
               </span>
             </div>
             <div className="grid grid-cols-3 gap-1 bg-white p-0.5 rounded-lg border border-black/[0.05] text-[10px] font-medium text-center">
               <button
                 type="button"
-                onClick={() => setAgentStatus("online")}
-                className={`py-1 rounded-md cursor-pointer transition-all ${
+                onClick={() => void setAgentStatus("online")}
+                disabled={statusLocked}
+                className={`py-1 rounded-md transition-all ${
+                  statusLocked ? "cursor-not-allowed opacity-60" : "cursor-pointer"
+                } ${
                   agentStatus === "online"
                     ? "bg-emerald-50 text-emerald-700 font-semibold shadow-2xs"
                     : "text-neutral-500 hover:bg-neutral-50"
@@ -160,8 +175,11 @@ export function Sidebar({
               </button>
               <button
                 type="button"
-                onClick={() => setAgentStatus("busy")}
-                className={`py-1 rounded-md cursor-pointer transition-all ${
+                onClick={() => void setAgentStatus("busy")}
+                disabled={statusLocked}
+                className={`py-1 rounded-md transition-all ${
+                  statusLocked ? "cursor-not-allowed opacity-60" : "cursor-pointer"
+                } ${
                   agentStatus === "busy"
                     ? "bg-amber-50 text-amber-700 font-semibold shadow-2xs"
                     : "text-neutral-500 hover:bg-neutral-50"
@@ -171,8 +189,11 @@ export function Sidebar({
               </button>
               <button
                 type="button"
-                onClick={() => setAgentStatus("away")}
-                className={`py-1 rounded-md cursor-pointer transition-all ${
+                onClick={() => void setAgentStatus("away")}
+                disabled={statusLocked}
+                className={`py-1 rounded-md transition-all ${
+                  statusLocked ? "cursor-not-allowed opacity-60" : "cursor-pointer"
+                } ${
                   agentStatus === "away"
                     ? "bg-neutral-100 text-neutral-800 font-semibold shadow-2xs"
                     : "text-neutral-500 hover:bg-neutral-50"
@@ -181,14 +202,30 @@ export function Sidebar({
                 Vắng
               </button>
             </div>
+            {agentStatusError && (
+              <p className="mt-1.5 text-[10px] text-rose-600 leading-snug" role="status">
+                {agentStatusError}
+              </p>
+            )}
           </div>
         ) : (
           /* Collapsed Status Dot */
           <div className="py-3 flex justify-center border-b border-black/[0.04]">
             <button
-              onClick={() => setAgentStatus(agentStatus === "online" ? "busy" : agentStatus === "busy" ? "away" : "online")}
-              title={`Trạng thái: ${agentStatus.toUpperCase()} (Nhấn để đổi)`}
-              className="relative p-2 rounded-lg hover:bg-neutral-100 cursor-pointer"
+              onClick={() =>
+                void setAgentStatus(
+                  agentStatus === "online" ? "busy" : agentStatus === "busy" ? "away" : "online",
+                )
+              }
+              disabled={statusLocked}
+              title={
+                agentStatus
+                  ? `Trạng thái: ${agentStatus.toUpperCase()} (Nhấn để đổi)`
+                  : "Đang kết nối..."
+              }
+              className={`relative p-2 rounded-lg hover:bg-neutral-100 ${
+                statusLocked ? "cursor-not-allowed opacity-60" : "cursor-pointer"
+              }`}
             >
               <span
                 className={`w-3 h-3 rounded-full block border-2 border-white shadow-xs ${
@@ -218,7 +255,12 @@ export function Sidebar({
               <div className="space-y-0.5">
                 {group.items.map((item) => {
                   const isActive = isNavigationActive(item.href, pathname);
-                  const unread = item.href === "/inbox" ? unreadCounts.unread : 0;
+                  const unread =
+                    item.href === "/inbox"
+                      ? unreadCounts.unread
+                      : item.href === "/tickets"
+                        ? ticketBadge
+                        : 0;
                   const badge = unread > 0 ? (unread > 99 ? "99+" : unread) : item.badge;
                   const Icon = item.icon;
 
@@ -261,7 +303,15 @@ export function Sidebar({
                                 }`
                           }`}
                         >
-                          <span aria-label={`${unread} tin nhắn chưa đọc`}>{badge}</span>
+                          <span
+                            aria-label={
+                              item.href === "/tickets"
+                                ? `${unread} ticket cần xử lý`
+                                : `${unread} tin nhắn chưa đọc`
+                            }
+                          >
+                            {badge}
+                          </span>
                         </span>
                       )}
                     </Link>
@@ -292,15 +342,12 @@ export function Sidebar({
             </div>
 
             {!collapsed && (
-              <form action={logout}>
-                <button
-                  type="submit"
-                  title="Đăng xuất tài khoản"
-                  className="p-1.5 rounded-lg text-neutral-400 hover:text-rose-600 hover:bg-rose-50 transition-colors cursor-pointer"
-                >
-                  <LogOut className="w-4 h-4" />
-                </button>
-              </form>
+              <LogoutButton
+                action={logout}
+                className="p-1.5 rounded-lg text-neutral-400 hover:text-rose-600 hover:bg-rose-50 transition-colors cursor-pointer"
+              >
+                <LogOut className="w-4 h-4" />
+              </LogoutButton>
             )}
           </div>
         </div>

@@ -6,6 +6,7 @@ import {
   ForbiddenException,
   Get,
   HttpCode,
+  Logger,
   NotFoundException,
   Param,
   Post,
@@ -29,6 +30,7 @@ import {
 import { ChatService, type ConversationAssignment } from './chat.service.js';
 import { SitesService, type SiteAccess } from '../sites/sites.service.js';
 import { UsersService } from '../users/users.service.js';
+import { NotificationsService } from '../notifications/notifications.service.js';
 
 import { RealtimeBusService } from '../realtime/realtime-bus.service.js';
 import { CurrentUser } from '../auth/current-user.decorator.js';
@@ -104,18 +106,30 @@ const DEFAULT_PAGE_SIZE = 30;
 
 @Controller('conversations')
 export class ConversationsController {
+  private readonly logger = new Logger(ConversationsController.name);
+
   constructor(
     private readonly chatService: ChatService,
     private readonly sitesService: SitesService,
     private readonly users: UsersService,
     private readonly bus: RealtimeBusService,
     private readonly internalNotes: InternalNotesService,
+    private readonly notifications: NotificationsService,
   ) {}
 
   @Get('unread-counts')
   async unreadCounts(@CurrentUser() actor: JwtPayload) {
-    const sites = await this.sitesService.listAccessible(actor.sub);
-    return this.chatService.unreadCounts(sites.map((site) => String(site._id)));
+    const [sites, user] = await Promise.all([
+      this.sitesService.listAccessible(actor.sub),
+      this.users.findById(actor.sub),
+    ]);
+
+    return this.chatService.unreadCounts(
+      sites.map((site) => String(site._id)),
+      // The person's own preference decides what counts for the tab title;
+      // an account that vanished mid-session simply gets no notification count.
+      { userId: actor.sub, notifyScope: user?.notifyScope },
+    );
   }
 
   /**
@@ -253,6 +267,13 @@ export class ConversationsController {
       );
     }
 
+    await this.notifyAssignment(
+      conversation,
+      currentUser.sub,
+      currentUser.sub,
+      updated,
+    );
+
     return { conversation: await this.publish(updated, site) };
   }
 
@@ -264,7 +285,7 @@ export class ConversationsController {
     @Param('id') id: string,
     @Body() dto: AssignConversationDto,
   ) {
-    const { site } = await this.loadAccessible(id, currentUser.sub, {
+    const { conversation, site } = await this.loadAccessible(id, currentUser.sub, {
       requireOwner: true,
     });
 
@@ -282,11 +303,19 @@ export class ConversationsController {
     if (!(await this.users.findById(dto.agentId))) {
       throw new BadRequestException('Assignment target no longer exists');
     }
+
     const updated = await this.chatService.assignConversation(id, dto.agentId);
 
     if (!updated) {
       throw new NotFoundException('Không tìm thấy hội thoại.');
     }
+
+    await this.notifyAssignment(
+      conversation,
+      currentUser.sub,
+      dto.agentId,
+      updated,
+    );
 
     return { conversation: await this.publish(updated, site) };
   }
@@ -453,6 +482,42 @@ export class ConversationsController {
    * that one carries the visitor's email and the project id, which have no
    * business being broadcast into a chat box on a public website.
    */
+  /**
+   * Rings the new holder's bell after a handover.
+   *
+   * Failures are swallowed on purpose: the thread has already changed hands and
+   * the response is already correct, so a lost chime must not turn a successful
+   * assignment into an error. `onAssignment` itself ignores self-assignment and
+   * a handover that changed nothing, which is why claiming your own thread
+   * never rings your own bell.
+   */
+  private async notifyAssignment(
+    previous: ConversationDocument,
+    actorId: string,
+    nextAgentId: string | null,
+    updated: ConversationDocument,
+  ): Promise<void> {
+    try {
+      await this.notifications.onAssignment({
+        actorId,
+        previousAgentId: previous.assignedAgentId
+          ? String(previous.assignedAgentId)
+          : null,
+        nextAgentId,
+        conversation: updated,
+        // The write itself dates the handover, so a replay of it is a duplicate
+        // and a later handover to the same person is a new event.
+        assignedAt: updated.get('updatedAt') as Date,
+      });
+    } catch (error) {
+      this.logger.warn(
+        `Assignment notification failed for conversation ${String(updated._id)}: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
+  }
+
   private async publishAssignment(
     conversation: ConversationDocument,
   ): Promise<void> {

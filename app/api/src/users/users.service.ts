@@ -1,7 +1,8 @@
 import { ConflictException, Injectable } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model, isValidObjectId } from 'mongoose';
-import { User, UserDocument, UserRole } from './user.schema.js';
+import { User, UserDocument, UserRole, type NotifyScope } from './user.schema.js';
+import { normalizeAgentStatus, type AgentStatus } from './agent-status.js';
 import { Site } from '../sites/site.schema.js';
 import type { CannedTemplate } from '../sites/site.schema.js';
 
@@ -78,8 +79,30 @@ export class UsersService {
     return this.userModel.findOne({ _id: id, deletedAt: null }).exec();
   }
 
-  async updateSelf(id: string, input: { name: string; jobTitle: string; avatarUrl: string } | { soundEnabled?: boolean; cannedResponses?: string[]; cannedResponseTemplates?: CannedTemplate[] }) {
+  async updateSelf(id: string, input: { name: string; jobTitle: string; avatarUrl: string } | { soundEnabled?: boolean; notifyScope?: NotifyScope; emailMissed?: boolean; cannedResponses?: string[]; cannedResponseTemplates?: CannedTemplate[] }) {
     return this.userModel.findByIdAndUpdate(id, { $set: input }, { returnDocument: 'after', runValidators: true }).exec();
+  }
+
+  /**
+   * Online / busy / away, chosen by the person themselves.
+   *
+   * Returns null for an unknown, deleted or malformed id rather than throwing:
+   * the caller is a websocket event, and a stale token must not crash a socket.
+   */
+  async setAgentStatus(userId: string, status: AgentStatus): Promise<AgentStatus | null> {
+    if (!isValidObjectId(userId)) {
+      return null;
+    }
+
+    const updated = await this.userModel
+      .findOneAndUpdate(
+        { _id: userId, deletedAt: null },
+        { $set: { agentStatus: status } },
+        { returnDocument: 'after', runValidators: true },
+      )
+      .exec();
+
+    return updated ? normalizeAgentStatus(updated.agentStatus) : null;
   }
 
   async changeOwnPassword(id: string, expectedHash: string, passwordHash: string) {
@@ -98,6 +121,17 @@ export class UsersService {
     }
 
     return this.userModel.find({ _id: { $in: valid } }).exec();
+  }
+
+  /** Verified, not deleted admins: the people who triage tickets. */
+  async listAdminIds(): Promise<string[]> {
+    const admins = await this.userModel
+      .find({ role: 'admin', emailVerified: true, deletedAt: null })
+      .select('_id')
+      .lean()
+      .exec();
+
+    return admins.map((admin) => String(admin._id));
   }
 
   async create(input: CreateUserInput): Promise<UserDocument> {

@@ -8,7 +8,18 @@ export type WidgetSettings = {
   imageUrl?: string;
   themeColor: string;
   greeting: string;
+  /** What the widget says while every agent is Bận. Optional: older sites predate it. */
+  busyMessage?: string;
+  /** What the widget says while every agent is Vắng. */
+  awayMessage?: string;
 };
+
+/** Copied from the api's agent-status.ts: the widget falls back to these when a site has none. */
+export const DEFAULT_BUSY_MESSAGE =
+  "Các nhân viên hiện đang bận. Bạn cứ để lại tin nhắn, chúng tôi sẽ phản hồi sớm.";
+
+export const DEFAULT_AWAY_MESSAGE =
+  "Hiện chúng tôi đang tạm vắng. Bạn vui lòng để lại tin nhắn và email để được hỗ trợ khi quay lại.";
 
 /**
  * When somebody is expected to be around. It gates nothing — a visitor may
